@@ -54,7 +54,7 @@ class AddCategory(StatesGroup):
         waiting_category_percent = State()
 
 
-    class ManageFund(StatesGroup):
+class ManageFund(StatesGroup):
             waiting_action = State()  # создать/пополнить/снять
             waiting_fund_name = State()
             waiting_amount = State()
