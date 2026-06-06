@@ -53,6 +53,13 @@ class AddCategory(StatesGroup):
         waiting_category_name = State()
         waiting_category_percent = State()
 
+
+    class ManageFund(StatesGroup):
+            waiting_action = State()  # создать/пополнить/снять
+            waiting_fund_name = State()
+            waiting_amount = State()
+        waiting_category_percent = State()
+
 # Хелперная функция: Расчёт бюджета по категориям
 def calculate_budget(salary):
     budget = {}
@@ -119,6 +126,10 @@ async def cmd_help(message: Message):
                     "/addcategory - Добавить новую категорию\n"
         "/today, /week, /month - Отчёты\n"
         "/categories, /accounts - Управление"
+                    "/funds - Просмотр фондов\n"
+                    "/createfund - Создать фонд\n"
+                    "/addfund - Пополнить фонд\n"
+                    "/withdrawfund - Снять с фонда\n"
     )
 
 # Команда /salary - установка зарплаты и расчёт бюджета
@@ -410,8 +421,112 @@ async def cmd_accounts(message: Message):
 
 @router.message(Command("funds"))
 async def cmd_funds(message: Message):
-    await message.answer("🏦 Фонды - в разработке")
+    user_id = message.from_user.id
+    if user_id not in user_data:
+                user_data[user_id] = {'balance': 0, 'operations': [], 'categories': list(DEFAULT_BUDGET_DISTRIBUTION.keys()), 'funds': {}}
 
+    funds = user_data[user_id].get('funds', {})
+    if not funds:
+                await message.answer("🏛️ Фонды\n\nУ вас пока нет фондов.\nИспользуйте /createfund для создания")
+                return
+
+    funds_list = "\n".join([f"💰 {name}: {amount} ₽" for name, amount in funds.items()])
+    total = sum(funds.values())
+    await message.answer(f"🏛️ Фонды\n\n{funds_list}\n\n📊 Итого: {total} ₽\n\nКоманды:\n/createfund - создать фонд\n/addfund - пополнить фонд\n/withdrawfund - снять с фонда")
+
+
+# Команда /createfund - создать фонд
+@router.message(Command("createfund"))
+async def cmd_createfund(message: Message, state: FSMContext):
+        await message.answer("🏛️ Создание фонда\nВведите название фонда (например, 'Отпуск', 'Ремонт', 'Образование'):")
+    await state.set_state(ManageFund.waiting_fund_name)
+    await state.update_data(action='create')
+
+
+# Команда /addfund - пополнить фонд
+@router.message(Command("addfund"))
+async def cmd_addfund(message: Message, state: FSMContext):
+        user_id = message.from_user.id
+    if user_id not in user_data or not user_data[user_id].get('funds'):
+                await message.answer("⚠️ Сначала создайте фонд с помощью /createfund")
+                return
+
+    funds = user_data[user_id]['funds']
+    funds_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(funds.keys())])
+    await message.answer(f"💸 Пополнение фонда\nВыберите фонд:\n{funds_list}")
+    await state.set_state(ManageFund.waiting_fund_name)
+    await state.update_data(action='add')
+
+
+# Команда /withdrawfund - снять с фонда
+@router.message(Command("withdrawfund"))
+async def cmd_withdrawfund(message: Message, state: FSMContext):
+        user_id = message.from_user.id
+    if user_id not in user_data or not user_data[user_id].get('funds'):
+                await message.answer("⚠️ Сначала создайте фонд с помощью /createfund")
+                return
+
+    funds = user_data[user_id]['funds']
+    funds_list = "\n".join([f"{i+1}. {name}: {amount} ₽" for i, (name, amount) in enumerate(funds.items())])
+    await message.answer(f"💵 Снятие с фонда\nВыберите фонд:\n{funds_list}")
+    await state.set_state(ManageFund.waiting_fund_name)
+    await state.update_data(action='withdraw')
+
+
+# FSM обработчики для управления фондами
+@router.message(ManageFund.waiting_fund_name)
+async def process_fund_name(message: Message, state: FSMContext):
+        user_id = message.from_user.id
+    data = await state.get_data()
+    action = data.get('action')
+
+    if action == 'create':
+                fund_name = message.text.strip()
+                if fund_name in user_data[user_id].get('funds', {}):
+                                await message.answer("⚠️ Фонд с таким названием уже существует")
+                                return
+                            if 'funds' not in user_data[user_id]:
+                                            user_data[user_id]['funds'] = {}
+                                        user_data[user_id]['funds'][fund_name] = 0
+        await message.answer(f"✅ Фонд '{fund_name}' создан!")
+        await state.clear()
+    else:
+        fund_name = message.text.strip()
+        funds = user_data[user_id].get('funds', {})
+        if fund_name not in funds:
+                        await message.answer("❌ Фонд не найден. Введите существующее название")
+                        return
+                    await state.update_data(fund_name=fund_name)
+        await message.answer("💰 Введите сумму:")
+        await state.set_state(ManageFund.waiting_amount)
+
+
+@router.message(ManageFund.waiting_amount)
+async def process_fund_amount(message: Message, state: FSMContext):
+        try:
+                    amount = float(message.text.replace(',', '.').replace(' ', ''))
+                    if amount <= 0:
+                                    await message.answer("❌ Сумма должна быть больше 0")
+                                    return
+
+        user_id = message.from_user.id
+        data = await state.get_data()
+        action = data.get('action')
+        fund_name = data.get('fund_name')
+
+        if action == 'add':
+                        user_data[user_id]['funds'][fund_name] += amount
+                        await message.answer(f"✅ Фонд '{fund_name}' пополнен на {amount} ₽\nТекущий баланс: {user_data[user_id]['funds'][fund_name]} ₽")
+                    elif action == 'withdraw':
+                                    if user_data[user_id]['funds'][fund_name] < amount:
+                                                        await message.answer(f"❌ Недостаточно средств в фонде. Доступно: {user_data[user_id]['funds'][fund_name]} ₽")
+                                                        return
+                                                    user_data[user_id]['funds'][fund_name] -= amount
+            await message.answer(f"✅ Снято {amount} ₽ с фонда '{fund_name}'\nОсталось: {user_data[user_id]['funds'][fund_name]} ₽")
+
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Введите число")
 @router.message(Command("settings"))
 async def cmd_settings(message: Message):
     await message.answer("⚙️ Настройки:\n• Язык: Русский\n• Валюта: ₽")
