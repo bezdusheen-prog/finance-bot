@@ -58,7 +58,6 @@ class AddCategory(StatesGroup):
             waiting_action = State()  # создать/пополнить/снять
             waiting_fund_name = State()
             waiting_amount = State()
-        waiting_category_percent = State()
 
 # Хелперная функция: Расчёт бюджета по категориям
 def calculate_budget(salary):
