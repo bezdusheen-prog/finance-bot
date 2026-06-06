@@ -173,7 +173,7 @@ async def cmd_editdistribution(message: Message, state: FSMContext):
                     await message.answer("⚠️ Сначала установите зарплату с помощью /salary")
                     return
 
-    categories_list = "\n".join([f"{i+1}. {cat}: {percent}%" for i, (cat, percent) in enumerate(DEFAULT_BUDGET_DISTRIBUTION.items())])
+        categories_list = "\n".join([f"{i+1}. {cat}: {percent}%" for i, (cat, percent) in enumerate(DEFAULT_BUDGET_DISTRIBUTION.items())])
     await message.answer(f"📊 Текущее распределение:\n{categories_list}\n\nВыберите номер категории для редактирования:")
     await state.set_state(EditDistribution.waiting_category)
 
