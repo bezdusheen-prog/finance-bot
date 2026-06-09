@@ -1,23 +1,14 @@
 import asyncio
-import csv
-import io
-import json
 import logging
 import os
-import re
-from collections import defaultdict
 from datetime import datetime, timedelta
 
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    BufferedInputFile,
-    FSInputFile,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -36,917 +27,452 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
-DEFAULT_BUDGET_DISTRIBUTION = {
-    "Коммуналка": 15,
-    "Аренда": 25,
-    "Кредиты": 10,
-    "Здоровье": 5,
-    "Одежда": 3,
-    "Образование": 3,
-    "Подарки": 2,
-    "Другое": 2,
+AUTO_DISTRIBUTION = {
+    "Еда": 35,
+    "Транспорт": 10,
+    "Накопления": 25,
+    "Развлечения": 10,
+    "Здоровье": 10,
+    "Прочее": 10,
 }
 
 user_data = {}
-recurring_payments = {}
-currency_rates = {"USD": 1.0, "EUR": 1.1, "RUB": 0.011}
-user_preferences = {}
 
 
-class AddOperation(StatesGroup):
+class AddIncome(StatesGroup):
+    waiting_amount = State()
+    waiting_comment = State()
+
+
+class AddExpense(StatesGroup):
     waiting_amount = State()
     waiting_category = State()
     waiting_comment = State()
 
 
-class SetSalary(StatesGroup):
+class BudgetFlow(StatesGroup):
     waiting_salary = State()
-
-
-class EditDistribution(StatesGroup):
-    waiting_category = State()
-    waiting_new_percent = State()
-
-
-class AddCategory(StatesGroup):
-    waiting_category_name = State()
-    waiting_category_percent = State()
-
-
-class ManageFund(StatesGroup):
-    waiting_fund_name = State()
-    waiting_amount = State()
-
-
-class RecurringPayment(StatesGroup):
-    waiting_name = State()
-    waiting_amount = State()
-    waiting_category = State()
-    waiting_period = State()
-
-
-class SmartInput(StatesGroup):
-    waiting_text = State()
-    waiting_voice = State()
-    waiting_photo = State()
-    waiting_amount = State()
-
-
-class ManageDebt(StatesGroup):
-    waiting_person = State()
-    waiting_amount = State()
-    waiting_description = State()
-
-
-class ManageGoal(StatesGroup):
-    waiting_goal_name = State()
-    waiting_target_amount = State()
-    waiting_current_amount = State()
+    waiting_rent = State()
+    waiting_utilities = State()
 
 
 def ensure_user(user_id: int):
     if user_id not in user_data:
         user_data[user_id] = {
             "balance": 0.0,
-            "salary": 0.0,
-            "budget": {},
             "operations": [],
-            "categories": list(DEFAULT_BUDGET_DISTRIBUTION.keys()),
-            "accounts": ["Наличные", "Карта"],
-            "funds": {},
-            "debts": [],
-            "goals": [],
-            "recurring": [],
+            "budget": None,
         }
 
 
-def calculate_budget(salary: float) -> dict:
-    budget = {}
-    for category, percent in DEFAULT_BUDGET_DISTRIBUTION.items():
-        budget[category] = round(salary * percent / 100, 2)
-    return budget
+def get_main_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="💰 Доход"), KeyboardButton(text="💸 Расход")],
+            [KeyboardButton(text="📊 Бюджет"), KeyboardButton(text="💼 Баланс")],
+            [KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📆 Неделя")],
+            [KeyboardButton(text="🗓 Месяц"), KeyboardButton(text="📜 История")],
+        ],
+        resize_keyboard=True,
+    )
 
 
-def get_spending_tip(remaining: float, category_budget: float) -> str:
-    if category_budget == 0:
-        return ""
-
-    percent_left = (remaining / category_budget) * 100
-    tips = [
-        ("Великолепно! Осталось {:.0f}% бюджета 🎉", 75, 101),
-        ("Отлично! Осталось {:.0f}% бюджета 😊", 50, 75),
-        ("Неплохо, но лучше сэкономить. Осталось {:.0f}% 👀", 25, 50),
-        ("Внимание! Бюджет почти исчерпан: {:.0f}% ⚠️", 0, 25),
-        ("Бюджет превышен! 😱", -100000, 0),
-    ]
-
-    for tip_text, min_p, max_p in tips:
-        if min_p <= percent_left < max_p:
-            return tip_text.format(percent_left) if "{:.0f}" in tip_text else tip_text
-
-    return ""
+def parse_amount(text: str) -> float:
+    return float(text.replace(" ", "").replace(",", "."))
 
 
-def get_category_keyboard():
-    buttons = []
-    categories = list(DEFAULT_BUDGET_DISTRIBUTION.keys())
+def calculate_auto_budget(salary: float, rent: float, utilities: float):
+    fixed_total = rent + utilities
+    remaining = salary - fixed_total
 
-    for i in range(0, len(categories), 2):
-        row = [InlineKeyboardButton(text=categories[i], callback_data=f"cat_{categories[i]}")]
-        if i + 1 < len(categories):
-            row.append(
-                InlineKeyboardButton(
-                    text=categories[i + 1],
-                    callback_data=f"cat_{categories[i + 1]}",
-                )
-            )
-        buttons.append(row)
+    if remaining < 0:
+        return None
 
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    auto_budget = {}
+    for category, percent in AUTO_DISTRIBUTION.items():
+        auto_budget[category] = round(remaining * percent / 100, 2)
+
+    return {
+        "salary": salary,
+        "rent": rent,
+        "utilities": utilities,
+        "fixed_total": fixed_total,
+        "remaining": remaining,
+        "auto_budget": auto_budget,
+    }
+
+
+def build_budget_text(budget_data: dict) -> str:
+    text = (
+        f"📊 Бюджет на месяц\n\n"
+        f"Доход: {budget_data['salary']:.2f} ₽\n\n"
+        f"Фиксированные траты:\n"
+        f"• Аренда: {budget_data['fixed']['Аренда']:.2f} ₽\n"
+        f"• Коммуналка: {budget_data['fixed']['Коммуналка']:.2f} ₽\n"
+        f"Итого fixed: {budget_data['fixed_total']:.2f} ₽\n\n"
+        f"Остаток для авто-распределения: {budget_data['remaining']:.2f} ₽\n\n"
+        f"Авто-распределение:\n"
+    )
+
+    for category, amount in budget_data["auto_budget"].items():
+        text += f"• {category}: {amount:.2f} ₽\n"
+
+    return text
 
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
+    ensure_user(message.from_user.id)
     await message.answer(
-        f"👋 Добро пожаловать, {message.from_user.first_name}!\n\n"
-        "💰 Финансовый помощник с бюджетированием.\n\n"
-        "Основные команды:\n"
-        "/salary - Установить зарплату и бюджет\n"
-        "/addincome - Добавить доход\n"
-        "/addexpense - Добавить расход\n"
-        "/balance - Баланс и бюджет\n"
-        "/tips - Напутствия по тратам\n"
-        "/history - История\n"
-        "/help - Полная справка"
+        "👋 Добро пожаловать в финансового бота.\n"
+        "Теперь основное управление идет через кнопки ниже.",
+        reply_markup=get_main_menu(),
     )
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
-        "📚 Помощник по финансам\n\n"
-        "/salary - Установить зарплату и автоматически рассчитать бюджет на месяц\n"
-        "/addincome - Добавить доход\n"
-        "/addexpense - Добавить расход\n"
-        "/balance - Текущий баланс и остатки бюджета\n"
-        "/tips - Получить напутствия по тратам\n"
-        "/editdistribution - Редактировать распределение бюджета\n"
-        "/addcategory - Добавить новую категорию\n"
-        "/today - Отчёт за сегодня\n"
-        "/week - Отчёт за 7 дней\n"
-        "/month - Отчёт за 30 дней\n"
-        "/history - История операций\n"
-        "/categories - Список категорий\n"
-        "/accounts - Счета\n"
-        "/funds - Просмотр фондов\n"
-        "/createfund - Создать фонд\n"
-        "/addfund - Пополнить фонд\n"
-        "/withdrawfund - Снять с фонда\n"
-        "/quick - Быстрый ввод расхода (/quick 500 Еда кофе)\n"
-        "/summary - Сводка по финансам\n"
-        "/settings - Настройки"
+        "Доступно:\n"
+        "• 💰 Доход — добавить доход\n"
+        "• 💸 Расход — добавить расход\n"
+        "• 📊 Бюджет — рассчитать месячный бюджет\n"
+        "• 💼 Баланс — текущий баланс\n"
+        "• 📅 Сегодня — отчет за сегодня\n"
+        "• 📆 Неделя — отчет за 7 дней\n"
+        "• 🗓 Месяц — отчет за 30 дней\n"
+        "• 📜 История — последние операции"
     )
 
 
-@router.message(Command("salary"))
-async def cmd_salary(message: Message, state: FSMContext):
-    await state.set_state(SetSalary.waiting_salary)
-    await message.answer("💵 Введите вашу зарплату в рублях:")
+@router.message(F.text == "💰 Доход")
+async def income_button(message: Message, state: FSMContext):
+    await state.set_state(AddIncome.waiting_amount)
+    await message.answer("Введите сумму дохода в рублях:")
 
 
-@router.message(SetSalary.waiting_salary)
-async def process_salary(message: Message, state: FSMContext):
+@router.message(AddIncome.waiting_amount)
+async def process_income_amount(message: Message, state: FSMContext):
     try:
-        salary = float(message.text.replace(",", ".").replace(" ", ""))
-        if salary <= 0:
-            await message.answer("❌ Зарплата должна быть больше нуля.")
-            return
-
-        user_id = message.from_user.id
-        ensure_user(user_id)
-
-        budget = calculate_budget(salary)
-        user_data[user_id]["salary"] = salary
-        user_data[user_id]["budget"] = budget
-
-        text = f"✅ Зарплата установлена: {salary:.2f} ₽\n\n📊 Бюджет на месяц:\n"
-        for cat, amount in budget.items():
-            text += f"• {cat}: {amount:.2f} ₽\n"
-
-        await message.answer(text)
-        await state.clear()
-
-    except ValueError:
-        await message.answer("❌ Неверный формат. Введите число.")
-
-
-@router.message(Command("editdistribution"))
-async def cmd_editdistribution(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    if not user_data[user_id].get("budget"):
-        await message.answer("⚠️ Сначала установите зарплату с помощью /salary")
-        return
-
-    categories_list = "\n".join(
-        [
-            f"{i + 1}. {cat}: {percent}%"
-            for i, (cat, percent) in enumerate(DEFAULT_BUDGET_DISTRIBUTION.items())
-        ]
-    )
-    await message.answer(
-        f"📊 Текущее распределение:\n{categories_list}\n\n"
-        "Выберите номер категории для редактирования:"
-    )
-    await state.set_state(EditDistribution.waiting_category)
-
-
-@router.message(EditDistribution.waiting_category)
-async def process_edit_category(message: Message, state: FSMContext):
-    try:
-        category_num = int(message.text)
-        categories = list(DEFAULT_BUDGET_DISTRIBUTION.keys())
-
-        if category_num < 1 or category_num > len(categories):
-            await message.answer("❌ Неверный номер категории")
-            return
-
-        selected_category = categories[category_num - 1]
-        current_percent = DEFAULT_BUDGET_DISTRIBUTION[selected_category]
-
-        await state.update_data(selected_category=selected_category)
-        await message.answer(
-            f"✏️ Категория: {selected_category}\n"
-            f"Текущий %: {current_percent}%\n\n"
-            "Введите новый процент:"
-        )
-        await state.set_state(EditDistribution.waiting_new_percent)
-
-    except ValueError:
-        await message.answer("❌ Введите число")
-
-
-@router.message(EditDistribution.waiting_new_percent)
-async def process_new_percent(message: Message, state: FSMContext):
-    try:
-        new_percent = int(float(message.text.replace(",", ".").replace(" ", "")))
-        if new_percent < 0 or new_percent > 100:
-            await message.answer("❌ Процент должен быть от 0 до 100")
-            return
-
-        data = await state.get_data()
-        selected_category = data.get("selected_category")
-
-        if not selected_category:
-            await message.answer("❌ Категория не выбрана")
-            await state.clear()
-            return
-
-        DEFAULT_BUDGET_DISTRIBUTION[selected_category] = new_percent
-        total = sum(DEFAULT_BUDGET_DISTRIBUTION.values())
-
-        await message.answer(
-            f"✅ Категория {selected_category} обновлена до {new_percent}%\n"
-            f"Сумма всех процентов: {total}%"
-        )
-        await state.clear()
-
-    except ValueError:
-        await message.answer("❌ Введите число")
-
-
-@router.message(Command("addcategory"))
-async def cmd_addcategory(message: Message, state: FSMContext):
-    await message.answer("🆕 Введите название новой категории:")
-    await state.set_state(AddCategory.waiting_category_name)
-
-
-@router.message(AddCategory.waiting_category_name)
-async def process_category_name(message: Message, state: FSMContext):
-    category_name = message.text.strip()
-
-    if not category_name:
-        await message.answer("❌ Название категории не может быть пустым")
-        return
-
-    if category_name in DEFAULT_BUDGET_DISTRIBUTION:
-        await message.answer("⚠️ Категория с таким названием уже существует")
-        return
-
-    await state.update_data(category_name=category_name)
-    await message.answer(
-        f"✏️ Категория: {category_name}\n"
-        "Введите процент бюджета для этой категории:"
-    )
-    await state.set_state(AddCategory.waiting_category_percent)
-
-
-@router.message(AddCategory.waiting_category_percent)
-async def process_category_percent(message: Message, state: FSMContext):
-    try:
-        percent = int(float(message.text.replace(",", ".").replace(" ", "")))
-        if percent < 0 or percent > 100:
-            await message.answer("❌ Процент должен быть от 0 до 100")
-            return
-
-        data = await state.get_data()
-        category_name = data.get("category_name")
-
-        if not category_name:
-            await message.answer("❌ Название категории не найдено")
-            await state.clear()
-            return
-
-        DEFAULT_BUDGET_DISTRIBUTION[category_name] = percent
-        total = sum(DEFAULT_BUDGET_DISTRIBUTION.values())
-
-        await message.answer(
-            f"✅ Категория '{category_name}' добавлена с {percent}%\n"
-            f"Сумма всех процентов: {total}%"
-        )
-        await state.clear()
-
-    except ValueError:
-        await message.answer("❌ Введите число")
-
-
-@router.message(Command("tips"))
-async def cmd_tips(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    if not user_data[user_id].get("budget"):
-        await message.answer("⚠️ Сначала установите зарплату с помощью /salary")
-        return
-
-    budget = user_data[user_id]["budget"]
-    spent_by_category = {}
-
-    for op in user_data[user_id].get("operations", []):
-        if op["type"] == "expense":
-            cat = op["category"]
-            spent_by_category[cat] = spent_by_category.get(cat, 0) + op["amount"]
-
-    text = "💡 Напутствия по тратам:\n\n"
-    for cat, budget_amount in budget.items():
-        spent = spent_by_category.get(cat, 0)
-        remaining = budget_amount - spent
-        tip = get_spending_tip(remaining, budget_amount)
-        text += f"• {cat}: {remaining:.2f} ₽ / {budget_amount:.2f} ₽\n"
-        if tip:
-            text += f"  {tip}\n"
-
-    await message.answer(text)
-
-
-@router.message(Command("addincome"))
-async def cmd_addincome(message: Message, state: FSMContext):
-    await state.set_state(AddOperation.waiting_amount)
-    await state.update_data(operation_type="income")
-    await message.answer("💵 Введите сумму дохода:")
-
-
-@router.message(Command("addexpense"))
-async def cmd_addexpense(message: Message, state: FSMContext):
-    await state.set_state(AddOperation.waiting_amount)
-    await state.update_data(operation_type="expense")
-    await message.answer("💸 Введите сумму расхода:")
-
-
-@router.message(AddOperation.waiting_amount)
-async def process_amount(message: Message, state: FSMContext):
-    try:
-        amount = float(message.text.replace(",", ".").replace(" ", ""))
+        amount = parse_amount(message.text)
         if amount <= 0:
-            await message.answer("❌ Сумма должна быть больше нуля")
+            await message.answer("❌ Сумма должна быть больше 0")
             return
 
         await state.update_data(amount=amount)
-        await state.set_state(AddOperation.waiting_category)
+        await state.set_state(AddIncome.waiting_comment)
+        await message.answer("Введите комментарий к доходу или '-' если без комментария:")
 
+    except ValueError:
+        await message.answer("❌ Введите сумму числом")
+
+
+@router.message(AddIncome.waiting_comment)
+async def process_income_comment(message: Message, state: FSMContext):
+    ensure_user(message.from_user.id)
+    data = await state.get_data()
+
+    comment = message.text.strip()
+    if comment == "-":
+        comment = ""
+
+    operation = {
+        "type": "income",
+        "amount": data["amount"],
+        "category": "Доход",
+        "comment": comment,
+        "date": datetime.now(),
+    }
+
+    user_data[message.from_user.id]["operations"].append(operation)
+    user_data[message.from_user.id]["balance"] += data["amount"]
+
+    await message.answer(
+        f"✅ Доход добавлен\n"
+        f"Сумма: {data['amount']:.2f} ₽\n"
+        f"Баланс: {user_data[message.from_user.id]['balance']:.2f} ₽",
+        reply_markup=get_main_menu(),
+    )
+    await state.clear()
+
+
+@router.message(F.text == "💸 Расход")
+async def expense_button(message: Message, state: FSMContext):
+    await state.set_state(AddExpense.waiting_amount)
+    await message.answer("Введите сумму расхода в рублях:")
+
+
+@router.message(AddExpense.waiting_amount)
+async def process_expense_amount(message: Message, state: FSMContext):
+    try:
+        amount = parse_amount(message.text)
+        if amount <= 0:
+            await message.answer("❌ Сумма должна быть больше 0")
+            return
+
+        await state.update_data(amount=amount)
+        await state.set_state(AddExpense.waiting_category)
         await message.answer(
-            f"✅ Сумма: {amount:.2f} ₽\n\n📂 Выберите категорию:",
-            reply_markup=get_category_keyboard(),
+            "Введите категорию расхода.\n"
+            "Например: Еда, Транспорт, Развлечения, Здоровье, Прочее"
         )
 
     except ValueError:
-        await message.answer("❌ Неверный формат суммы")
+        await message.answer("❌ Введите сумму числом")
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("cat_"))
-async def process_category_callback(callback_query, state: FSMContext):
-    category = callback_query.data.replace("cat_", "")
-    await state.update_data(category=category)
-    await callback_query.message.edit_text(
-        f"✅ Выбрана категория: {category}\n\n📝 Введите комментарий (или '-'):"
-    )
-    await state.set_state(AddOperation.waiting_comment)
-    await callback_query.answer()
-
-
-@router.message(AddOperation.waiting_category)
-async def process_category(message: Message, state: FSMContext):
+@router.message(AddExpense.waiting_category)
+async def process_expense_category(message: Message, state: FSMContext):
     category = message.text.strip()
     if not category:
         await message.answer("❌ Категория не может быть пустой")
         return
 
     await state.update_data(category=category)
-    await state.set_state(AddOperation.waiting_comment)
-    await message.answer("📝 Комментарий (или '-' если без комментария):")
+    await state.set_state(AddExpense.waiting_comment)
+    await message.answer("Введите комментарий к расходу или '-' если без комментария:")
 
 
-@router.message(AddOperation.waiting_comment)
-async def process_comment(message: Message, state: FSMContext):
+@router.message(AddExpense.waiting_comment)
+async def process_expense_comment(message: Message, state: FSMContext):
+    ensure_user(message.from_user.id)
+    data = await state.get_data()
+
     comment = message.text.strip()
     if comment == "-":
         comment = ""
 
-    data = await state.get_data()
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
     operation = {
-        "type": data["operation_type"],
+        "type": "expense",
         "amount": data["amount"],
         "category": data["category"],
         "comment": comment,
         "date": datetime.now(),
     }
 
-    user_data[user_id]["operations"].append(operation)
-
-    if data["operation_type"] == "income":
-        user_data[user_id]["balance"] += data["amount"]
-        emoji = "💰"
-        op_type = "Доход"
-    else:
-        user_data[user_id]["balance"] -= data["amount"]
-        emoji = "💸"
-        op_type = "Расход"
+    user_data[message.from_user.id]["operations"].append(operation)
+    user_data[message.from_user.id]["balance"] -= data["amount"]
 
     await message.answer(
-        f"{emoji} {op_type} добавлен\n"
+        f"✅ Расход добавлен\n"
         f"Сумма: {data['amount']:.2f} ₽\n"
         f"Категория: {data['category']}\n"
-        f"Баланс: {user_data[user_id]['balance']:.2f} ₽"
+        f"Баланс: {user_data[message.from_user.id]['balance']:.2f} ₽",
+        reply_markup=get_main_menu(),
     )
     await state.clear()
 
 
-@router.message(Command("balance"))
-async def cmd_balance(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    bal = user_data[user_id]["balance"]
-    text = f"💰 Баланс: {bal:.2f} ₽\n\n"
-
-    if user_data[user_id].get("budget"):
-        text += "📊 Остатки бюджета:\n"
-        for cat, budg in user_data[user_id]["budget"].items():
-            spent = sum(
-                op["amount"]
-                for op in user_data[user_id].get("operations", [])
-                if op["type"] == "expense" and op["category"] == cat
-            )
-            text += f"• {cat}: {budg - spent:.2f} / {budg:.2f} ₽\n"
-
-    await message.answer(text)
+@router.message(F.text == "📊 Бюджет")
+async def start_budget_flow(message: Message, state: FSMContext):
+    await state.set_state(BudgetFlow.waiting_salary)
+    await message.answer("Введите вашу зарплату за месяц в рублях:")
 
 
-@router.message(Command("today"))
-async def cmd_today(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    if not user_data[user_id]["operations"]:
-        await message.answer("📊 Операций нет")
-        return
-
-    today = datetime.now().date()
-    ops = [o for o in user_data[user_id]["operations"] if o["date"].date() == today]
-
-    if not ops:
-        await message.answer("📊 Операций за сегодня нет")
-        return
-
-    inc = sum(o["amount"] for o in ops if o["type"] == "income")
-    exp = sum(o["amount"] for o in ops if o["type"] == "expense")
-
-    await message.answer(
-        f"📊 Сегодня:\n"
-        f"💰 +{inc:.2f} ₽\n"
-        f"💸 -{exp:.2f} ₽\n"
-        f"📈 Итого: {inc - exp:.2f} ₽"
-    )
-
-
-@router.message(Command("week"))
-async def cmd_week(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    week_ago = datetime.now() - timedelta(days=7)
-    ops = [o for o in user_data[user_id]["operations"] if o["date"] >= week_ago]
-
-    if not ops:
-        await message.answer("📊 За неделю операций нет")
-        return
-
-    inc = sum(o["amount"] for o in ops if o["type"] == "income")
-    exp = sum(o["amount"] for o in ops if o["type"] == "expense")
-
-    await message.answer(
-        f"📊 Неделя:\n"
-        f"💰 +{inc:.2f} ₽\n"
-        f"💸 -{exp:.2f} ₽\n"
-        f"📈 Итого: {inc - exp:.2f} ₽"
-    )
-
-
-@router.message(Command("month"))
-async def cmd_month(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    month_ago = datetime.now() - timedelta(days=30)
-    ops = [o for o in user_data[user_id]["operations"] if o["date"] >= month_ago]
-
-    if not ops:
-        await message.answer("📊 За месяц операций нет")
-        return
-
-    inc = sum(o["amount"] for o in ops if o["type"] == "income")
-    exp = sum(o["amount"] for o in ops if o["type"] == "expense")
-
-    await message.answer(
-        f"📊 Месяц:\n"
-        f"💰 +{inc:.2f} ₽\n"
-        f"💸 -{exp:.2f} ₽\n"
-        f"📈 Итого: {inc - exp:.2f} ₽"
-    )
-
-
-@router.message(Command("history"))
-async def cmd_history(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    if not user_data[user_id]["operations"]:
-        await message.answer("📜 История пуста")
-        return
-
-    ops = user_data[user_id]["operations"][-15:]
-    text = "📜 Последние 15 операций:\n\n"
-
-    for o in reversed(ops):
-        emoji = "💰" if o["type"] == "income" else "💸"
-        dt = o["date"].strftime("%d.%m %H:%M")
-        comment_part = f" — {o['comment']}" if o["comment"] else ""
-        text += f"{emoji} {o['amount']:.2f} ₽ | {o['category']} | {dt}{comment_part}\n"
-
-    await message.answer(text)
-
-
-@router.message(Command("categories"))
-async def cmd_categories(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    cats = user_data[user_id]["categories"]
-    await message.answer(
-        "📂 Категории:\n" + "\n".join([f"{i + 1}. {c}" for i, c in enumerate(cats)])
-    )
-
-
-@router.message(Command("accounts"))
-async def cmd_accounts(message: Message):
-    await message.answer("💳 Счета:\n1. Наличные\n2. Карта")
-
-
-@router.message(Command("funds"))
-async def cmd_funds(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    funds = user_data[user_id].get("funds", {})
-    if not funds:
-        await message.answer(
-            "🏛️ Фонды\n\n"
-            "У вас пока нет фондов.\n"
-            "Используйте /createfund для создания."
-        )
-        return
-
-    funds_list = "\n".join([f"💰 {name}: {amount:.2f} ₽" for name, amount in funds.items()])
-    total = sum(funds.values())
-
-    await message.answer(
-        f"🏛️ Фонды\n\n{funds_list}\n\n"
-        f"📊 Итого: {total:.2f} ₽\n\n"
-        "Команды:\n"
-        "/createfund - создать фонд\n"
-        "/addfund - пополнить фонд\n"
-        "/withdrawfund - снять с фонда"
-    )
-
-
-@router.message(Command("createfund"))
-async def cmd_createfund(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    await message.answer(
-        "🏛️ Создание фонда\n"
-        "Введите название фонда, например: Отпуск, Ремонт, Образование"
-    )
-    await state.set_state(ManageFund.waiting_fund_name)
-    await state.update_data(action="create")
-
-
-@router.message(Command("addfund"))
-async def cmd_addfund(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    funds = user_data[user_id].get("funds", {})
-    if not funds:
-        await message.answer("⚠️ Сначала создайте фонд с помощью /createfund")
-        return
-
-    funds_list = "\n".join([f"• {name}" for name in funds.keys()])
-    await message.answer(f"💸 Пополнение фонда\nВыберите фонд по имени:\n{funds_list}")
-    await state.set_state(ManageFund.waiting_fund_name)
-    await state.update_data(action="add")
-
-
-@router.message(Command("withdrawfund"))
-async def cmd_withdrawfund(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    funds = user_data[user_id].get("funds", {})
-    if not funds:
-        await message.answer("⚠️ Сначала создайте фонд с помощью /createfund")
-        return
-
-    funds_list = "\n".join([f"• {name}: {amount:.2f} ₽" for name, amount in funds.items()])
-    await message.answer(f"💵 Снятие с фонда\nВыберите фонд по имени:\n{funds_list}")
-    await state.set_state(ManageFund.waiting_fund_name)
-    await state.update_data(action="withdraw")
-
-
-@router.message(ManageFund.waiting_fund_name)
-async def process_fund_name(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    ensure_user(user_id)
-
-    data = await state.get_data()
-    action = data.get("action")
-    fund_name = message.text.strip()
-
-    if not fund_name:
-        await message.answer("❌ Название фонда не может быть пустым")
-        return
-
-    if action == "create":
-        if fund_name in user_data[user_id].get("funds", {}):
-            await message.answer("⚠️ Фонд с таким названием уже существует")
-            return
-
-        user_data[user_id]["funds"][fund_name] = 0.0
-        await message.answer(f"✅ Фонд '{fund_name}' создан")
-        await state.clear()
-        return
-
-    funds = user_data[user_id].get("funds", {})
-    if fund_name not in funds:
-        await message.answer("❌ Фонд не найден. Введите существующее название.")
-        return
-
-    await state.update_data(fund_name=fund_name)
-    await state.set_state(ManageFund.waiting_amount)
-    await message.answer("💰 Введите сумму:")
-
-
-@router.message(ManageFund.waiting_amount)
-async def process_fund_amount(message: Message, state: FSMContext):
+@router.message(BudgetFlow.waiting_salary)
+async def process_budget_salary(message: Message, state: FSMContext):
     try:
-        amount = float(message.text.replace(",", ".").replace(" ", ""))
-        if amount <= 0:
-            await message.answer("❌ Сумма должна быть больше 0")
+        salary = parse_amount(message.text)
+        if salary <= 0:
+            await message.answer("❌ Зарплата должна быть больше 0")
             return
 
-        user_id = message.from_user.id
-        ensure_user(user_id)
+        await state.update_data(salary=salary)
+        await state.set_state(BudgetFlow.waiting_rent)
+        await message.answer("Введите сумму аренды в рублях:")
+
+    except ValueError:
+        await message.answer("❌ Введите сумму числом")
+
+
+@router.message(BudgetFlow.waiting_rent)
+async def process_budget_rent(message: Message, state: FSMContext):
+    try:
+        rent = parse_amount(message.text)
+        if rent < 0:
+            await message.answer("❌ Сумма не может быть отрицательной")
+            return
+
+        await state.update_data(rent=rent)
+        await state.set_state(BudgetFlow.waiting_utilities)
+        await message.answer("Введите сумму коммуналки в рублях:")
+
+    except ValueError:
+        await message.answer("❌ Введите сумму числом")
+
+
+@router.message(BudgetFlow.waiting_utilities)
+async def process_budget_utilities(message: Message, state: FSMContext):
+    try:
+        utilities = parse_amount(message.text)
+        if utilities < 0:
+            await message.answer("❌ Сумма не может быть отрицательной")
+            return
 
         data = await state.get_data()
-        action = data.get("action")
-        fund_name = data.get("fund_name")
+        salary = data["salary"]
+        rent = data["rent"]
 
-        if not fund_name:
-            await message.answer("❌ Фонд не выбран")
+        result = calculate_auto_budget(salary, rent, utilities)
+        if result is None:
+            await message.answer(
+                "❌ Фиксированные расходы превышают доход.\n"
+                "Введите /start и попробуйте заново с корректными суммами.",
+                reply_markup=get_main_menu(),
+            )
             await state.clear()
             return
 
-        if action == "add":
-            user_data[user_id]["funds"][fund_name] += amount
-            await message.answer(
-                f"✅ Фонд '{fund_name}' пополнен на {amount:.2f} ₽\n"
-                f"Текущий баланс: {user_data[user_id]['funds'][fund_name]:.2f} ₽"
-            )
+        ensure_user(message.from_user.id)
 
-        elif action == "withdraw":
-            if user_data[user_id]["funds"][fund_name] < amount:
-                await message.answer(
-                    f"❌ Недостаточно средств в фонде.\n"
-                    f"Доступно: {user_data[user_id]['funds'][fund_name]:.2f} ₽"
-                )
-                return
+        budget_data = {
+            "salary": result["salary"],
+            "fixed": {
+                "Аренда": result["rent"],
+                "Коммуналка": result["utilities"],
+            },
+            "fixed_total": result["fixed_total"],
+            "remaining": result["remaining"],
+            "auto_budget": result["auto_budget"],
+        }
 
-            user_data[user_id]["funds"][fund_name] -= amount
-            await message.answer(
-                f"✅ Снято {amount:.2f} ₽ с фонда '{fund_name}'\n"
-                f"Осталось: {user_data[user_id]['funds'][fund_name]:.2f} ₽"
-            )
+        user_data[message.from_user.id]["budget"] = budget_data
 
-        else:
-            await message.answer("❌ Неизвестное действие")
-            await state.clear()
-            return
-
+        await message.answer(
+            build_budget_text(budget_data),
+            reply_markup=get_main_menu(),
+        )
         await state.clear()
 
     except ValueError:
-        await message.answer("❌ Введите число")
+        await message.answer("❌ Введите сумму числом")
 
 
-@router.message(Command("quick"))
-async def cmd_quick(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    ensure_user(user_id)
+@router.message(F.text == "💼 Баланс")
+async def balance_button(message: Message):
+    ensure_user(message.from_user.id)
+    balance = user_data[message.from_user.id]["balance"]
+    budget = user_data[message.from_user.id].get("budget")
 
-    args = message.text.split(maxsplit=3)
-    if len(args) < 3:
-        await message.answer(
-            "💡 Использование: /quick [сумма] [категория] [комментарий]\n\n"
-            "Примеры:\n"
-            "• /quick 500 Еда кофе\n"
-            "• /quick 1200 Транспорт такси\n"
-            "• /quick 350 Здоровье аптека"
-        )
-        return
+    text = f"💼 Текущий баланс: {balance:.2f} ₽\n\n"
+    if budget:
+        text += build_budget_text(budget)
+    else:
+        text += "Бюджет пока не рассчитан."
 
-    try:
-        amount = float(args[1].replace(",", "."))
-        category = args[2] if len(args) > 2 else "Другое"
-        comment = args[3] if len(args) > 3 else "-"
-
-        if amount <= 0:
-            await message.answer("❌ Сумма должна быть больше нуля!")
-            return
-
-        operation = {
-            "type": "expense",
-            "amount": amount,
-            "category": category,
-            "comment": comment,
-            "date": datetime.now(),
-        }
-
-        user_data[user_id]["operations"].append(operation)
-        user_data[user_id]["balance"] -= amount
-
-        budget_warning = ""
-        if user_data[user_id].get("budget"):
-            budget = user_data[user_id]["budget"]
-            if category in budget:
-                spent = sum(
-                    op["amount"]
-                    for op in user_data[user_id]["operations"]
-                    if op["type"] == "expense" and op["category"] == category
-                )
-                if spent > budget[category]:
-                    budget_warning = f"\n⚠️ Бюджет по категории '{category}' превышен!"
-
-        await message.answer(
-            f"✅ Расход добавлен!\n\n"
-            f"💸 Сумма: {amount:.2f} ₽\n"
-            f"📂 Категория: {category}\n"
-            f"📝 Комментарий: {comment}\n"
-            f"💰 Баланс: {user_data[user_id]['balance']:.2f} ₽{budget_warning}"
-        )
-
-    except ValueError:
-        await message.answer("❌ Неверный формат суммы! Используйте число.")
+    await message.answer(text, reply_markup=get_main_menu())
 
 
-@router.message(Command("summary"))
-async def cmd_summary(message: Message):
-    user_id = message.from_user.id
-    ensure_user(user_id)
+@router.message(F.text == "📅 Сегодня")
+async def today_button(message: Message):
+    ensure_user(message.from_user.id)
 
-    if not user_data[user_id].get("operations"):
-        await message.answer("📊 Операций нет")
-        return
-
-    now = datetime.now()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = now - timedelta(days=7)
-    month_start = now - timedelta(days=30)
-
-    today_income = sum(
-        o["amount"]
-        for o in user_data[user_id]["operations"]
-        if o["type"] == "income" and o["date"] >= today_start
-    )
-    today_expense = sum(
-        o["amount"]
-        for o in user_data[user_id]["operations"]
-        if o["type"] == "expense" and o["date"] >= today_start
-    )
-
-    week_income = sum(
-        o["amount"]
-        for o in user_data[user_id]["operations"]
-        if o["type"] == "income" and o["date"] >= week_start
-    )
-    week_expense = sum(
-        o["amount"]
-        for o in user_data[user_id]["operations"]
-        if o["type"] == "expense" and o["date"] >= week_start
-    )
-
-    month_income = sum(
-        o["amount"]
-        for o in user_data[user_id]["operations"]
-        if o["type"] == "income" and o["date"] >= month_start
-    )
-    month_expense = sum(
-        o["amount"]
-        for o in user_data[user_id]["operations"]
-        if o["type"] == "expense" and o["date"] >= month_start
-    )
-
-    month_ops = [
-        o
-        for o in user_data[user_id]["operations"]
-        if o["type"] == "expense" and o["date"] >= month_start
+    today = datetime.now().date()
+    ops = [
+        op for op in user_data[message.from_user.id]["operations"]
+        if op["date"].date() == today
     ]
-    category_spending = {}
-    for op in month_ops:
-        cat = op["category"]
-        category_spending[cat] = category_spending.get(cat, 0) + op["amount"]
 
-    top_categories = sorted(category_spending.items(), key=lambda x: x[1], reverse=True)[:5]
+    if not ops:
+        await message.answer("За сегодня операций нет.", reply_markup=get_main_menu())
+        return
 
-    text = "📊 Сводка по финансам\n\n"
-    text += "📅 Сегодня:\n"
-    text += f"💰 Доходы: +{today_income:.2f} ₽\n"
-    text += f"💸 Расходы: -{today_expense:.2f} ₽\n"
-    text += f"📈 Итог: {today_income - today_expense:.2f} ₽\n\n"
+    income = sum(op["amount"] for op in ops if op["type"] == "income")
+    expense = sum(op["amount"] for op in ops if op["type"] == "expense")
 
-    text += "📆 Неделя (7 дней):\n"
-    text += f"💰 Доходы: +{week_income:.2f} ₽\n"
-    text += f"💸 Расходы: -{week_expense:.2f} ₽\n"
-    text += f"📈 Итог: {week_income - week_expense:.2f} ₽\n\n"
-
-    text += "📆 Месяц (30 дней):\n"
-    text += f"💰 Доходы: +{month_income:.2f} ₽\n"
-    text += f"💸 Расходы: -{month_expense:.2f} ₽\n"
-    text += f"📈 Итог: {month_income - month_expense:.2f} ₽\n\n"
-
-    if top_categories:
-        text += "🏆 Топ-5 категорий (месяц):\n"
-        for i, (cat, amount) in enumerate(top_categories, 1):
-            text += f"{i}. {cat}: {amount:.2f} ₽\n"
-
-    await message.answer(text)
-
-
-@router.message(Command("settings"))
-async def cmd_settings(message: Message):
     await message.answer(
-        "⚙️ Настройки:\n"
-        "• Язык: Русский\n"
-        "• Валюта: ₽"
+        f"📅 Сегодня\n"
+        f"Доходы: {income:.2f} ₽\n"
+        f"Расходы: {expense:.2f} ₽\n"
+        f"Итог: {income - expense:.2f} ₽",
+        reply_markup=get_main_menu(),
     )
+
+
+@router.message(F.text == "📆 Неделя")
+async def week_button(message: Message):
+    ensure_user(message.from_user.id)
+
+    date_from = datetime.now() - timedelta(days=7)
+    ops = [
+        op for op in user_data[message.from_user.id]["operations"]
+        if op["date"] >= date_from
+    ]
+
+    if not ops:
+        await message.answer("За неделю операций нет.", reply_markup=get_main_menu())
+        return
+
+    income = sum(op["amount"] for op in ops if op["type"] == "income")
+    expense = sum(op["amount"] for op in ops if op["type"] == "expense")
+
+    await message.answer(
+        f"📆 Неделя\n"
+        f"Доходы: {income:.2f} ₽\n"
+        f"Расходы: {expense:.2f} ₽\n"
+        f"Итог: {income - expense:.2f} ₽",
+        reply_markup=get_main_menu(),
+    )
+
+
+@router.message(F.text == "🗓 Месяц")
+async def month_button(message: Message):
+    ensure_user(message.from_user.id)
+
+    date_from = datetime.now() - timedelta(days=30)
+    ops = [
+        op for op in user_data[message.from_user.id]["operations"]
+        if op["date"] >= date_from
+    ]
+
+    if not ops:
+        await message.answer("За месяц операций нет.", reply_markup=get_main_menu())
+        return
+
+    income = sum(op["amount"] for op in ops if op["type"] == "income")
+    expense = sum(op["amount"] for op in ops if op["type"] == "expense")
+
+    await message.answer(
+        f"🗓 Месяц\n"
+        f"Доходы: {income:.2f} ₽\n"
+        f"Расходы: {expense:.2f} ₽\n"
+        f"Итог: {income - expense:.2f} ₽",
+        reply_markup=get_main_menu(),
+    )
+
+
+@router.message(F.text == "📜 История")
+async def history_button(message: Message):
+    ensure_user(message.from_user.id)
+
+    operations = user_data[message.from_user.id]["operations"]
+    if not operations:
+        await message.answer("История операций пуста.", reply_markup=get_main_menu())
+        return
+
+    text = "📜 Последние операции:\n\n"
+    for op in operations[-10:]:
+        emoji = "💰" if op["type"] == "income" else "💸"
+        comment = f" ({op['comment']})" if op["comment"] else ""
+        text += (
+            f"{emoji} {op['amount']:.2f} ₽ | {op['category']} | "
+            f"{op['date'].strftime('%d.%m %H:%M')}{comment}\n"
+        )
+
+    await message.answer(text, reply_markup=get_main_menu())
 
 
 @router.message()
-async def echo_handler(message: Message):
-    await message.answer("Я вас не понял. Используйте /help")
+async def fallback_handler(message: Message):
+    await message.answer(
+        "Используйте кнопки меню ниже.",
+        reply_markup=get_main_menu(),
+    )
 
 
 async def main():
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Бот запущен")
     await dp.start_polling(bot)
 
 
