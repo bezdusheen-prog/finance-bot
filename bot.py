@@ -1,30 +1,35 @@
 import asyncio
+import csv
+import io
+import json
 import logging
 import os
+import re
+from collections import defaultdict
 from datetime import datetime, timedelta
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message
-from dotenv import load_
-import json
-import io
-import matplotlib
-matplotlib.use('Agg')  # Используем non-GUI backend
-import matplotlib.pyplot as plt
-import pandas as pd
-from aiogram.types import BufferedInputFile, FSInputFile
-import re
-import csv
-from collections import defaultdictdotenv
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    BufferedInputFile,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
+from dotenv import load_dotenv
 
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -35,7 +40,6 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
-
 
 DEFAULT_BUDGET_DISTRIBUTION = {
     "Коммуналка": 15,
@@ -50,14 +54,13 @@ DEFAULT_BUDGET_DISTRIBUTION = {
 
 user_data = {}
 
+recurring_payments = {}
+currency_rates = {"USD": 1.0, "EUR": 1.1, "RUB": 0.011}
+user_preferences = {}
+
 
 class AddOperation(StatesGroup):
-    waiting_am
-    
-    # Дополнительные глобальные структуры данных
-recurring_payments = {}  # Повторяющиеся платежи
-currency_rates = {'USD': 1.0, 'EUR': 1.1, 'RUB': 0.011}  # Курсы валют
-user_preferences = {}  # Предпочтения пользователяount = State()
+    waiting_amount = State()
     waiting_category = State()
     waiting_comment = State()
 
@@ -78,12 +81,15 @@ class AddCategory(StatesGroup):
 
 class ManageFund(StatesGroup):
     waiting_fund_name = State()
+    waiting_amount = State()
 
-    class RecurringPayment(StatesGroup):
+
+class RecurringPayment(StatesGroup):
     waiting_name = State()
     waiting_amount = State()
     waiting_category = State()
     waiting_period = State()
+
 
 class SmartInput(StatesGroup):
     waiting_text = State()
@@ -91,10 +97,12 @@ class SmartInput(StatesGroup):
     waiting_photo = State()
     waiting_amount = State()
 
+
 class ManageDebt(StatesGroup):
     waiting_person = State()
     waiting_amount = State()
     waiting_description = State()
+
 
 class ManageGoal(StatesGroup):
     waiting_goal_name = State()
@@ -112,9 +120,9 @@ def ensure_user(user_id: int):
             "categories": list(DEFAULT_BUDGET_DISTRIBUTION.keys()),
             "accounts": ["Наличные", "Карта"],
             "funds": {},
-                        "debts": [],  # Список долгов {person, amount, type: 'lend'/'borrow', description, date}
-            "goals": [],  # Цели {name, target, current, date}
-            "recurring": []  # Повторяющиеся платежи
+            "debts": [],
+            "goals": [],
+            "recurring": [],
         }
 
 
@@ -140,11 +148,27 @@ def get_spending_tip(remaining: float, category_budget: float) -> str:
 
     for tip_text, min_p, max_p in tips:
         if min_p <= percent_left < max_p:
-            if "{}" in tip_text:
-                return tip_text.format(percent_left)
-            return tip_text
+            return tip_text.format(percent_left) if "{:.0f}" in tip_text else tip_text
 
     return ""
+
+
+def get_category_keyboard():
+    buttons = []
+    categories = list(DEFAULT_BUDGET_DISTRIBUTION.keys())
+
+    for i in range(0, len(categories), 2):
+        row = [InlineKeyboardButton(text=categories[i], callback_data=f"cat_{categories[i]}")]
+        if i + 1 < len(categories):
+            row.append(
+                InlineKeyboardButton(
+                    text=categories[i + 1],
+                    callback_data=f"cat_{categories[i + 1]}",
+                )
+            )
+        buttons.append(row)
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 @router.message(CommandStart())
@@ -177,15 +201,6 @@ async def cmd_help(message: Message):
         "/tips - Получить напутствия по тратам\n"
         "/editdistribution - Редактировать распределение бюджета\n"
         "/addcategory - Добавить новую категорию\n"
-                    "/today, /week, /month - Отчёты\\n"
-            "/quick - Быстрый ввод расхода\\n"
-            "/summary - Полная сводка\\n"
-            "/export - Экспорт в CSV\\n"
-            "/recurring - Управление подписками\\n"
-            "/lend, /borrow - Учёт долгов\\n"
-            "/debts - Посмотреть долги\\n"
-            "/goals - Финансовые цели\\n"
-            "/creategoal - Создать цель\\n"
         "/today - Отчёт за сегодня\n"
         "/week - Отчёт за 7 дней\n"
         "/month - Отчёт за 30 дней\n"
@@ -196,12 +211,12 @@ async def cmd_help(message: Message):
         "/createfund - Создать фонд\n"
         "/addfund - Пополнить фонд\n"
         "/withdrawfund - Снять с фонда\n"
+        "/quick - Быстрый ввод расхода (/quick 500 Еда кофе)\n"
+        "/summary - Сводка по финансам\n"
         "/settings - Настройки"
     )
 
 
-        "/quick - Быстрый ввод расхода (/quick 500 еда кофе)\n"
-        "/summary - Сводка по финансам за период\n"
 @router.message(Command("salary"))
 async def cmd_salary(message: Message, state: FSMContext):
     await state.set_state(SetSalary.waiting_salary)
@@ -284,7 +299,7 @@ async def process_edit_category(message: Message, state: FSMContext):
 @router.message(EditDistribution.waiting_new_percent)
 async def process_new_percent(message: Message, state: FSMContext):
     try:
-        new_percent = int(message.text.replace(",", ".").replace(" ", ""))
+        new_percent = int(float(message.text.replace(",", ".").replace(" ", "")))
         if new_percent < 0 or new_percent > 100:
             await message.answer("❌ Процент должен быть от 0 до 100")
             return
@@ -339,13 +354,18 @@ async def process_category_name(message: Message, state: FSMContext):
 @router.message(AddCategory.waiting_category_percent)
 async def process_category_percent(message: Message, state: FSMContext):
     try:
-        percent = int(message.text.replace(",", ".").replace(" ", ""))
+        percent = int(float(message.text.replace(",", ".").replace(" ", "")))
         if percent < 0 or percent > 100:
             await message.answer("❌ Процент должен быть от 0 до 100")
             return
 
         data = await state.get_data()
         category_name = data.get("category_name")
+
+        if not category_name:
+            await message.answer("❌ Название категории не найдено")
+            await state.clear()
+            return
 
         DEFAULT_BUDGET_DISTRIBUTION[category_name] = percent
         total = sum(DEFAULT_BUDGET_DISTRIBUTION.values())
@@ -414,17 +434,25 @@ async def process_amount(message: Message, state: FSMContext):
         await state.update_data(amount=amount)
         await state.set_state(AddOperation.waiting_category)
 
-        user_id = message.from_user.id
-        ensure_user(user_id)
-        cats = user_data[user_id]["categories"]
-
+        await message.answer(
+            f"✅ Сумма: {amount:.2f} ₽\n\n📂 Выберите категорию:",
+            reply_markup=get_category_keyboard(),
+        )
 
     except ValueError:
         await message.answer("❌ Неверный формат суммы")
-await message.answer(
-            f"✅ Сумма: {amount:.2f} ₽\n\n📂 Выберите категорию:",
-            reply_markup=get_category_keyboard()
-        )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("cat_"))
+async def process_category_callback(callback_query, state: FSMContext):
+    category = callback_query.data.replace("cat_", "")
+    await state.update_data(category=category)
+    await callback_query.message.edit_text(
+        f"✅ Выбрана категория: {category}\n\n📝 Введите комментарий (или '-'):"
+    )
+    await state.set_state(AddOperation.waiting_comment)
+    await callback_query.answer()
+
 
 @router.message(AddOperation.waiting_category)
 async def process_category(message: Message, state: FSMContext):
@@ -586,9 +614,7 @@ async def cmd_history(message: Message):
         emoji = "💰" if o["type"] == "income" else "💸"
         dt = o["date"].strftime("%d.%m %H:%M")
         comment_part = f" — {o['comment']}" if o["comment"] else ""
-        text += (
-            f"{emoji} {o['amount']:.2f} ₽ | {o['category']} | {dt}{comment_part}\n"
-        )
+        text += f"{emoji} {o['amount']:.2f} ₽ | {o['category']} | {dt}{comment_part}\n"
 
     await message.answer(text)
 
@@ -766,6 +792,149 @@ async def process_fund_amount(message: Message, state: FSMContext):
         await message.answer("❌ Введите число")
 
 
+@router.message(Command("quick"))
+async def cmd_quick(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    ensure_user(user_id)
+
+    args = message.text.split(maxsplit=3)
+    if len(args) < 3:
+        await message.answer(
+            "💡 Использование: /quick [сумма] [категория] [комментарий]\n\n"
+            "Примеры:\n"
+            "• /quick 500 Еда кофе\n"
+            "• /quick 1200 Транспорт такси\n"
+            "• /quick 350 Здоровье аптека"
+        )
+        return
+
+    try:
+        amount = float(args[1].replace(",", "."))
+        category = args[2] if len(args) > 2 else "Другое"
+        comment = args[3] if len(args) > 3 else "-"
+
+        if amount <= 0:
+            await message.answer("❌ Сумма должна быть больше нуля!")
+            return
+
+        operation = {
+            "type": "expense",
+            "amount": amount,
+            "category": category,
+            "comment": comment,
+            "date": datetime.now(),
+        }
+
+        user_data[user_id]["operations"].append(operation)
+        user_data[user_id]["balance"] -= amount
+
+        budget_warning = ""
+        if user_data[user_id].get("budget"):
+            budget = user_data[user_id]["budget"]
+            if category in budget:
+                spent = sum(
+                    op["amount"]
+                    for op in user_data[user_id]["operations"]
+                    if op["type"] == "expense" and op["category"] == category
+                )
+                if spent > budget[category]:
+                    budget_warning = f"\n⚠️ Бюджет по категории '{category}' превышен!"
+
+        await message.answer(
+            f"✅ Расход добавлен!\n\n"
+            f"💸 Сумма: {amount:.2f} ₽\n"
+            f"📂 Категория: {category}\n"
+            f"📝 Комментарий: {comment}\n"
+            f"💰 Баланс: {user_data[user_id]['balance']:.2f} ₽{budget_warning}"
+        )
+
+    except ValueError:
+        await message.answer("❌ Неверный формат суммы! Используйте число.")
+
+
+@router.message(Command("summary"))
+async def cmd_summary(message: Message):
+    user_id = message.from_user.id
+    ensure_user(user_id)
+
+    if not user_data[user_id].get("operations"):
+        await message.answer("📊 Операций нет")
+        return
+
+    now = datetime.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
+
+    today_income = sum(
+        o["amount"]
+        for o in user_data[user_id]["operations"]
+        if o["type"] == "income" and o["date"] >= today_start
+    )
+    today_expense = sum(
+        o["amount"]
+        for o in user_data[user_id]["operations"]
+        if o["type"] == "expense" and o["date"] >= today_start
+    )
+
+    week_income = sum(
+        o["amount"]
+        for o in user_data[user_id]["operations"]
+        if o["type"] == "income" and o["date"] >= week_start
+    )
+    week_expense = sum(
+        o["amount"]
+        for o in user_data[user_id]["operations"]
+        if o["type"] == "expense" and o["date"] >= week_start
+    )
+
+    month_income = sum(
+        o["amount"]
+        for o in user_data[user_id]["operations"]
+        if o["type"] == "income" and o["date"] >= month_start
+    )
+    month_expense = sum(
+        o["amount"]
+        for o in user_data[user_id]["operations"]
+        if o["type"] == "expense" and o["date"] >= month_start
+    )
+
+    month_ops = [
+        o
+        for o in user_data[user_id]["operations"]
+        if o["type"] == "expense" and o["date"] >= month_start
+    ]
+    category_spending = {}
+    for op in month_ops:
+        cat = op["category"]
+        category_spending[cat] = category_spending.get(cat, 0) + op["amount"]
+
+    top_categories = sorted(category_spending.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    text = "📊 Сводка по финансам\n\n"
+    text += "📅 Сегодня:\n"
+    text += f"💰 Доходы: +{today_income:.2f} ₽\n"
+    text += f"💸 Расходы: -{today_expense:.2f} ₽\n"
+    text += f"📈 Итог: {today_income - today_expense:.2f} ₽\n\n"
+
+    text += "📆 Неделя (7 дней):\n"
+    text += f"💰 Доходы: +{week_income:.2f} ₽\n"
+    text += f"💸 Расходы: -{week_expense:.2f} ₽\n"
+    text += f"📈 Итог: {week_income - week_expense:.2f} ₽\n\n"
+
+    text += "📆 Месяц (30 дней):\n"
+    text += f"💰 Доходы: +{month_income:.2f} ₽\n"
+    text += f"💸 Расходы: -{month_expense:.2f} ₽\n"
+    text += f"📈 Итог: {month_income - month_expense:.2f} ₽\n\n"
+
+    if top_categories:
+        text += "🏆 Топ-5 категорий (месяц):\n"
+        for i, (cat, amount) in enumerate(top_categories, 1):
+            text += f"{i}. {cat}: {amount:.2f} ₽\n"
+
+    await message.answer(text)
+
+
 @router.message(Command("settings"))
 async def cmd_settings(message: Message):
     await message.answer(
@@ -778,155 +947,6 @@ async def cmd_settings(message: Message):
 @router.message()
 async def echo_handler(message: Message):
     await message.answer("Я вас не понял. Используйте /help")
-
-
-# Команда /quick - быстрый ввод расхода одной строкой (например: /quick 500 еда кофе)
-@router.message(Command("quick"))
-async def cmd_quick(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    
-    # Парсим аргументы команды
-    args = message.text.split(maxsplit=3)
-    if len(args) < 3:
-        await message.answer(
-            "💡 Использование: /quick [сумма] [категория] [комментарий]\n\n"
-            "Примеры:\n"
-            "• /quick 500 Еда кофе\n"
-            "• /quick 1200 Транспорт такси\n"
-            "• /quick 350 Здоровье аптека"
-        )
-        return
-    
-    try:
-        amount = float(args[1].replace(',', '.'))
-        category = args[2] if len(args) > 2 else "Другое"
-        comment = args[3] if len(args) > 3 else "-"
-        
-        if amount <= 0:
-            await message.answer("❌ Сумма должна быть больше нуля!")
-            return
-        
-        # Инициализация данных пользователя
-        if user_id not in user_data:
-            user_data[user_id] = {'balance': 0, 'operations': [], 'budget': {}, 'categories': list(DEFAULT_BUDGET_DISTRIBUTION.keys())}
-        
-        # Создаем операцию
-        operation = {
-            'type': 'expense',
-            'amount': amount,
-            'category': category,
-            'comment': comment,
-            'date': datetime.now()
-        }
-        
-        user_data[user_id]['operations'].append(operation)
-        user_data[user_id]['balance'] -= amount
-        
-        # Проверка превышения бюджета
-        budget_warning = ""
-        if user_id in user_data and user_data[user_id].get('budget'):
-            budget = user_data[user_id]['budget']
-            if category in budget:
-                spent = sum(op['amount'] for op in user_data[user_id]['operations'] if op['type']=='expense' and op['category']==category)
-                if spent > budget[category]:
-                    budget_warning = f"\n⚠️ Бюджет по категории '{category}' превышен!"
-        
-        await message.answer(
-            f"✅ Расход добавлен!\n\n"
-            f"💸 Сумма: {amount:.2f} ₽\n"
-            f"📂 Категория: {category}\n"
-            f"📝 Комментарий: {comment}\n"
-            f"💰 Баланс: {user_data[user_id]['balance']:.2f} ₽{budget_warning}"
-        )
-    
-    except ValueError:
-        await message.answer("❌ Неверный формат суммы! Используйте число.")
-
-
-# Команда /summary - сводка за период
-@router.message(Command("summary"))
-async def cmd_summary(message: Message):
-    user_id = message.from_user.id
-    if user_id not in user_data or not user_data[user_id].get('operations'):
-        await message.answer("📊 Операций нет")
-        return
-    
-    # Периоды
-    now = datetime.now()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = now - timedelta(days=7)
-    month_start = now - timedelta(days=30)
-    
-    # Подсчет по периодам
-    today_income = sum(o['amount'] for o in user_data[user_id]['operations'] if o['type']=='income' and o['date'] >= today_start)
-    today_expense = sum(o['amount'] for o in user_data[user_id]['operations'] if o['type']=='expense' and o['date'] >= today_start)
-    
-    week_income = sum(o['amount'] for o in user_data[user_id]['operations'] if o['type']=='income' and o['date'] >= week_start)
-    week_expense = sum(o['amount'] for o in user_data[user_id]['operations'] if o['type']=='expense' and o['date'] >= week_start)
-    
-    month_income = sum(o['amount'] for o in user_data[user_id]['operations'] if o['type']=='income' and o['date'] >= month_start)
-    month_expense = sum(o['amount'] for o in user_data[user_id]['operations'] if o['type']=='expense' and o['date'] >= month_start)
-    
-    # Топ категорий за месяц
-    month_ops = [o for o in user_data[user_id]['operations'] if o['type']=='expense' and o['date'] >= month_start]
-    category_spending = {}
-    for op in month_ops:
-        cat = op['category']
-        category_spending[cat] = category_spending.get(cat, 0) + op['amount']
-    
-    top_categories = sorted(category_spending.items(), key=lambda x: x[1], reverse=True)[:5]
-    
-    text = "📊 **Сводка по финансам**\n\n"
-    
-    text += "📅 **Сегодня:**\n"
-    text += f"💰 Доходы: +{today_income:.2f} ₽\n"
-    text += f"💸 Расходы: -{today_expense:.2f} ₽\n"
-    text += f"📈 Итог: {today_income - today_expense:.2f} ₽\n\n"
-    
-    text += "📆 **Неделя (7 дней):**\n"
-    text += f"💰 Доходы: +{week_income:.2f} ₽\n"
-    text += f"💸 Расходы: -{week_expense:.2f} ₽\n"
-    text += f"📈 Итог: {week_income - week_expense:.2f} ₽\n\n"
-    
-    text += "📆 **Месяц (30 дней):**\n"
-    text += f"💰 Доходы: +{month_income:.2f} ₽\n"
-    text += f"💸 Расходы: -{month_expense:.2f} ₽\n"
-    text += f"📈 Итог: {month_income - month_expense:.2f} ₽\n\n"
-    
-    if top_categories:
-        text += "🏆 **Топ-5 категорий (месяц):**\n"
-        for i, (cat, amount) in enumerate(top_categories, 1):
-            text += f"{i}. {cat}: {amount:.2f} ₽\n"
-    
-    await message.answer(text)
-
-
-# Функция для создания inline-клавиатуры с категориями
-def get_category_keyboard():
-    buttons = []
-    categories = list(DEFAULT_BUDGET_DISTRIBUTION.keys())
-    
-    # Создаем кнопки по 2 в ряд
-    for i in range(0, len(categories), 2):
-        row = []
-        row.append(InlineKeyboardButton(text=categories[i], callback_data=f"cat_{categories[i]}"))
-        if i + 1 < len(categories):
-            row.append(InlineKeyboardButton(text=categories[i+1], callback_data=f"cat_{categories[i+1]}"))
-        buttons.append(row)
-    
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-# Обработчик нажатий на кнопки категорий
-@router.callback_query(lambda c: c.data and c.data.startswith('cat_'))
-async def process_category_callback(callback_query, state: FSMContext):
-    category = callback_query.data.replace('cat_', '')
-    await state.update_data(category=category)
-    await callback_query.message.edit_text(f"✅ Выбрана категория: {category}\n\n📝 Введите комментарий (или '-'):")
-    await state.set_state(AddOperation.waiting_comment)
-    await callback_query.answer()
-
-
 
 
 async def main():
