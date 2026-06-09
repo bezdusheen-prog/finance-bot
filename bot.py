@@ -9,7 +9,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
-from dotenv import load_dotenv
+from dotenv import load_
+import json
+import io
+import matplotlib
+matplotlib.use('Agg')  # Используем non-GUI backend
+import matplotlib.pyplot as plt
+import pandas as pd
+from aiogram.types import BufferedInputFile, FSInputFile
+import re
+import csv
+from collections import defaultdictdotenv
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 
@@ -42,7 +52,12 @@ user_data = {}
 
 
 class AddOperation(StatesGroup):
-    waiting_amount = State()
+    waiting_am
+    
+    # Дополнительные глобальные структуры данных
+recurring_payments = {}  # Повторяющиеся платежи
+currency_rates = {'USD': 1.0, 'EUR': 1.1, 'RUB': 0.011}  # Курсы валют
+user_preferences = {}  # Предпочтения пользователяount = State()
     waiting_category = State()
     waiting_comment = State()
 
@@ -63,7 +78,28 @@ class AddCategory(StatesGroup):
 
 class ManageFund(StatesGroup):
     waiting_fund_name = State()
+
+    class RecurringPayment(StatesGroup):
+    waiting_name = State()
     waiting_amount = State()
+    waiting_category = State()
+    waiting_period = State()
+
+class SmartInput(StatesGroup):
+    waiting_text = State()
+    waiting_voice = State()
+    waiting_photo = State()
+    waiting_amount = State()
+
+class ManageDebt(StatesGroup):
+    waiting_person = State()
+    waiting_amount = State()
+    waiting_description = State()
+
+class ManageGoal(StatesGroup):
+    waiting_goal_name = State()
+    waiting_target_amount = State()
+    waiting_current_amount = State()
 
 
 def ensure_user(user_id: int):
@@ -76,6 +112,9 @@ def ensure_user(user_id: int):
             "categories": list(DEFAULT_BUDGET_DISTRIBUTION.keys()),
             "accounts": ["Наличные", "Карта"],
             "funds": {},
+                        "debts": [],  # Список долгов {person, amount, type: 'lend'/'borrow', description, date}
+            "goals": [],  # Цели {name, target, current, date}
+            "recurring": []  # Повторяющиеся платежи
         }
 
 
@@ -138,6 +177,15 @@ async def cmd_help(message: Message):
         "/tips - Получить напутствия по тратам\n"
         "/editdistribution - Редактировать распределение бюджета\n"
         "/addcategory - Добавить новую категорию\n"
+                    "/today, /week, /month - Отчёты\\n"
+            "/quick - Быстрый ввод расхода\\n"
+            "/summary - Полная сводка\\n"
+            "/export - Экспорт в CSV\\n"
+            "/recurring - Управление подписками\\n"
+            "/lend, /borrow - Учёт долгов\\n"
+            "/debts - Посмотреть долги\\n"
+            "/goals - Финансовые цели\\n"
+            "/creategoal - Создать цель\\n"
         "/today - Отчёт за сегодня\n"
         "/week - Отчёт за 7 дней\n"
         "/month - Отчёт за 30 дней\n"
