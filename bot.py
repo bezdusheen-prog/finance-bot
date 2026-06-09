@@ -8,10 +8,6 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import pandas as pd
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -28,6 +24,12 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN is not set")
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
