@@ -31,13 +31,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is not set")
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is not set")
-
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -55,7 +48,6 @@ DEFAULT_BUDGET_DISTRIBUTION = {
 }
 
 user_data = {}
-
 recurring_payments = {}
 currency_rates = {"USD": 1.0, "EUR": 1.1, "RUB": 0.011}
 user_preferences = {}
