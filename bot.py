@@ -49,6 +49,7 @@ from db import (
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger("aiogram.event").setLevel(logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -239,6 +240,26 @@ class SettingsFlow(StatesGroup):
     viewing = State()
 
 
+# ========= нормализация текста для кнопок =========
+
+def norm_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return (
+        value.replace("ё", "е")
+        .replace("Ё", "Е")
+        .replace("\uFE0F", "")  # emoji variation
+        .strip()
+    )
+
+
+def is_button(message: Message, *variants: str) -> bool:
+    text = norm_text(message.text)
+    return any(text == norm_text(v) for v in variants)
+
+
+# ================== клавиатуры =====================
+
 def root_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -405,6 +426,8 @@ def settings_time_inline() -> InlineKeyboardMarkup:
     )
 
 
+# ================== утилиты =====================
+
 def parse_amount(text: str) -> float:
     cleaned = text.replace(" ", "").replace(",", ".")
     try:
@@ -564,6 +587,8 @@ async def start_fund_flow(message: Message, state: FSMContext):
     await message.answer("Название фонда:", reply_markup=cancel_menu())
 
 
+# ============ команды и глобальные кнопки (приоритетные) ============
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await get_or_create_user(message.from_user.id, message.from_user.full_name)
@@ -586,60 +611,54 @@ async def inline_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(F.text == "🏠 Главная")
+@router.message(lambda m: is_button(m, "🏠 Главная"))
 async def btn_home(message: Message, state: FSMContext):
     await state.clear()
     await show_home(message)
 
 
-@router.message(F.text == "➕ Добавить")
+@router.message(lambda m: is_button(m, "➕ Добавить"))
 async def btn_add(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("➕ Что добавить?", reply_markup=add_menu())
 
 
-@router.message(F.text == "💰 Доход")
-@router.message(F.text == "🔁 Еще доход")
+@router.message(lambda m: is_button(m, "💰 Доход", "🔁 Еще доход"))
 async def btn_income(message: Message, state: FSMContext):
     await start_income_flow(message, state)
 
 
-@router.message(F.text == "💸 Расход")
-@router.message(F.text == "🔁 Еще расход")
+@router.message(lambda m: is_button(m, "💸 Расход", "🔁 Еще расход"))
 async def btn_expense(message: Message, state: FSMContext):
     await start_expense_flow(message, state)
 
 
-@router.message(F.text == "🎯 Цель")
-@router.message(F.text == "🔁 Еще цель")
+@router.message(lambda m: is_button(m, "🎯 Цель", "🔁 Еще цель"))
 async def btn_goal(message: Message, state: FSMContext):
     await start_goal_flow(message, state)
 
 
-@router.message(F.text == "💳 Долг")
-@router.message(F.text == "🔁 Еще долг")
+@router.message(lambda m: is_button(m, "💳 Долг", "🔁 Еще долг"))
 async def btn_debt(message: Message, state: FSMContext):
     await start_debt_flow(message, state)
 
 
-@router.message(F.text == "🔁 Автоплатеж")
-@router.message(F.text == "🔁 Еще автоплатеж")
+@router.message(lambda m: is_button(m, "🔁 Автоплатеж", "🔁 Еще автоплатеж"))
 async def btn_recurring(message: Message, state: FSMContext):
     await start_recurring_flow(message, state)
 
 
-@router.message(F.text == "🏦 Фонд")
-@router.message(F.text == "🔁 Еще фонд")
+@router.message(lambda m: is_button(m, "🏦 Фонд", "🔁 Еще фонд"))
 async def btn_fund(message: Message, state: FSMContext):
     await start_fund_flow(message, state)
 
 
-@router.message(F.text == "📊 Бюджет")
+@router.message(lambda m: is_button(m, "📊 Бюджет"))
 async def btn_budget(message: Message, state: FSMContext):
     await open_budget_entry(message, state)
 
 
-@router.message(F.text == "📜 История")
+@router.message(lambda m: is_button(m, "📜 История"))
 async def btn_history(message: Message, state: FSMContext):
     await state.clear()
     operations = await get_recent_operations(message.from_user.id)
@@ -654,7 +673,7 @@ async def btn_history(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=root_menu())
 
 
-@router.message(F.text == "📌 Сводка")
+@router.message(lambda m: is_button(m, "📌 Сводка"))
 async def btn_summary(message: Message, state: FSMContext):
     await state.clear()
     balance = await get_balance(message.from_user.id)
@@ -676,20 +695,20 @@ async def btn_summary(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=root_menu())
 
 
-@router.message(F.text == "⚙️ Еще")
+@router.message(lambda m: is_button(m, "⚙️ Еще", "⚙️ Ещё", "⚙ Еще", "⚙ Ещё"))
 async def btn_more(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("⚙️ Дополнительно", reply_markup=more_menu())
 
 
-@router.message(F.text == "💼 Баланс")
+@router.message(lambda m: is_button(m, "💼 Баланс"))
 async def btn_balance(message: Message, state: FSMContext):
     await state.clear()
     balance = await get_balance(message.from_user.id)
     await message.answer(f"💼 Баланс\n{await money(message.from_user.id, balance)}", reply_markup=more_menu())
 
 
-@router.message(F.text == "📅 Сегодня")
+@router.message(lambda m: is_button(m, "📅 Сегодня"))
 async def btn_today(message: Message, state: FSMContext):
     await state.clear()
     operations = await get_period_operations(message.from_user.id, 1)
@@ -706,7 +725,7 @@ async def btn_today(message: Message, state: FSMContext):
     )
 
 
-@router.message(F.text == "📆 Неделя")
+@router.message(lambda m: is_button(m, "📆 Неделя"))
 async def btn_week(message: Message, state: FSMContext):
     await state.clear()
     operations = await get_period_operations(message.from_user.id, 7)
@@ -721,7 +740,7 @@ async def btn_week(message: Message, state: FSMContext):
     )
 
 
-@router.message(F.text == "🗓 Месяц")
+@router.message(lambda m: is_button(m, "🗓 Месяц"))
 async def btn_month(message: Message, state: FSMContext):
     await state.clear()
     operations = await get_period_operations(message.from_user.id, 30)
@@ -736,7 +755,7 @@ async def btn_month(message: Message, state: FSMContext):
     )
 
 
-@router.message(F.text == "📂 Бюджет месяца")
+@router.message(lambda m: is_button(m, "📂 Бюджет месяца"))
 async def btn_current_budget(message: Message, state: FSMContext):
     await state.clear()
     budget = await get_budget_by_month(message.from_user.id, get_current_month_key())
@@ -747,7 +766,7 @@ async def btn_current_budget(message: Message, state: FSMContext):
     await message.answer(await build_budget_from_db(message.from_user.id, budget), reply_markup=more_menu())
 
 
-@router.message(F.text == "📚 Архив бюджетов")
+@router.message(lambda m: is_button(m, "📚 Архив бюджетов"))
 async def btn_budget_archive(message: Message, state: FSMContext):
     await state.clear()
     budgets = await get_budget_archive(message.from_user.id)
@@ -765,7 +784,7 @@ async def btn_budget_archive(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=more_menu())
 
 
-@router.message(F.text == "🎯 Цели")
+@router.message(lambda m: is_button(m, "🎯 Цели"))
 async def btn_goals(message: Message, state: FSMContext):
     await state.clear()
     goals = await get_goals(message.from_user.id)
@@ -780,7 +799,7 @@ async def btn_goals(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=more_menu())
 
 
-@router.message(F.text == "💳 Долги")
+@router.message(lambda m: is_button(m, "💳 Долги"))
 async def btn_debts(message: Message, state: FSMContext):
     await state.clear()
     debts = await get_debts(message.from_user.id)
@@ -796,7 +815,7 @@ async def btn_debts(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=more_menu())
 
 
-@router.message(F.text == "🔁 Автоплатежи")
+@router.message(lambda m: is_button(m, "🔁 Автоплатежи"))
 async def btn_recurring_list(message: Message, state: FSMContext):
     await state.clear()
     recurring = await get_recurring(message.from_user.id)
@@ -812,7 +831,7 @@ async def btn_recurring_list(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=more_menu())
 
 
-@router.message(F.text == "🏦 Фонды")
+@router.message(lambda m: is_button(m, "🏦 Фонды"))
 async def btn_funds(message: Message, state: FSMContext):
     await state.clear()
     funds = await get_funds(message.from_user.id)
@@ -827,7 +846,7 @@ async def btn_funds(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=more_menu())
 
 
-@router.message(F.text == "⚙️ Настройки")
+@router.message(lambda m: is_button(m, "⚙️ Настройки"))
 async def btn_settings(message: Message, state: FSMContext):
     await state.set_state(SettingsFlow.viewing)
     user = await get_or_create_user(message.from_user.id)
@@ -843,17 +862,19 @@ async def btn_settings(message: Message, state: FSMContext):
     await message.answer("Изменить параметры:", reply_markup=settings_inline(user))
 
 
-@router.message(F.text == "⬅️ Назад")
+@router.message(lambda m: is_button(m, "⬅️ Назад"))
 async def btn_back(message: Message, state: FSMContext):
     await state.clear()
     await show_home(message)
 
 
-@router.message(F.text == "❌ Отмена")
+@router.message(lambda m: is_button(m, "❌ Отмена"))
 async def btn_cancel(message: Message, state: FSMContext):
     await state.clear()
     await show_home(message, "❌ Действие отменено")
 
+
+# ================== сценарии дохода/расхода =====================
 
 @router.message(AddIncomeFlow.waiting_amount)
 async def income_amount(message: Message, state: FSMContext):
@@ -949,6 +970,8 @@ async def expense_comment(message: Message, state: FSMContext):
         repeat_menu("expense"),
     )
 
+
+# ================== цели / долги / автоплатежи / фонды =====================
 
 @router.message(GoalFlow.waiting_name)
 async def goal_name(message: Message, state: FSMContext):
@@ -1084,6 +1107,8 @@ async def fund_monthly(message: Message, state: FSMContext):
         await message.answer("❌ Введите сумму числом", reply_markup=cancel_menu())
 
 
+# ================== сценарий бюджета =====================
+
 @router.message(BudgetFlow.waiting_salary)
 async def budget_salary(message: Message, state: FSMContext):
     try:
@@ -1128,7 +1153,10 @@ async def budget_utilities(message: Message, state: FSMContext):
 
         await state.update_data(preview_budget=result)
         await state.set_state(BudgetFlow.preview_distribution)
-        await message.answer(await build_budget_preview_text(message.from_user.id, result), reply_markup=budget_preview_inline())
+        await message.answer(
+            await build_budget_preview_text(message.from_user.id, result),
+            reply_markup=budget_preview_inline(),
+        )
     except ValueError:
         await message.answer("❌ Введите сумму числом", reply_markup=cancel_menu())
 
@@ -1172,14 +1200,18 @@ async def budget_edit_amount(message: Message, state: FSMContext):
 
         if distributed_sum > round(preview["remaining"], 2):
             await message.answer(
-                f"❌ Распределение больше остатка: {await money(message.from_user.id, distributed_sum)} > {await money(message.from_user.id, preview['remaining'])}",
+                f"❌ Распределение больше остатка: "
+                f"{await money(message.from_user.id, distributed_sum)} > {await money(message.from_user.id, preview['remaining'])}",
                 reply_markup=cancel_menu(),
             )
             return
 
         await state.update_data(preview_budget=preview, edit_category=None)
         await state.set_state(BudgetFlow.confirm_distribution)
-        await message.answer(await build_budget_preview_text(message.from_user.id, preview), reply_markup=budget_confirm_inline())
+        await message.answer(
+            await build_budget_preview_text(message.from_user.id, preview),
+            reply_markup=budget_confirm_inline(),
+        )
     except ValueError:
         await message.answer("❌ Введите сумму числом", reply_markup=cancel_menu())
 
@@ -1193,7 +1225,10 @@ async def budget_confirm(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(BudgetFlow.confirm_distribution)
-    await callback.message.answer(await build_budget_preview_text(callback.from_user.id, preview), reply_markup=budget_confirm_inline())
+    await callback.message.answer(
+        await build_budget_preview_text(callback.from_user.id, preview),
+        reply_markup=budget_confirm_inline(),
+    )
     await callback.answer()
 
 
@@ -1226,9 +1261,14 @@ async def budget_save(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await callback.message.answer("✅ Бюджет сохранен", reply_markup=root_menu())
-    await callback.message.answer(await build_budget_preview_text(callback.from_user.id, preview), reply_markup=root_menu())
+    await callback.message.answer(
+        await build_budget_preview_text(callback.from_user.id, preview),
+        reply_markup=root_menu(),
+    )
     await callback.answer()
 
+
+# ================== настройки =====================
 
 @router.callback_query(F.data == "settings:toggle_reminders")
 async def settings_toggle_reminders(callback: CallbackQuery):
@@ -1279,16 +1319,26 @@ async def settings_time(callback: CallbackQuery):
 async def settings_time_apply(callback: CallbackQuery):
     value = callback.data.split(":", 1)[1]
     updated = await update_user_settings(callback.from_user.id, notification_time=value)
-    await callback.message.answer(f"✅ Время уведомлений: {updated.notification_time}", reply_markup=settings_inline(updated))
+    await callback.message.answer(
+        f"✅ Время уведомлений: {updated.notification_time}",
+        reply_markup=settings_inline(updated),
+    )
     await callback.answer()
 
 
+# ================== fallback-логгер =====================
+
 @router.message()
-async def fallback_message(message: Message):
+async def fallback_message(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    logger.info("FALLBACK text=%r state=%r user=%s", message.text, current_state, message.from_user.id)
     await message.answer("Используйте кнопки меню.", reply_markup=root_menu())
 
 
+# ================== запуск =====================
+
 async def main():
+    print("BOT STARTED FROM THIS FILE")
     await init_db()
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
