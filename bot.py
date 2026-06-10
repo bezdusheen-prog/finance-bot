@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
@@ -512,19 +512,6 @@ def calculate_auto_budget(salary: float, rent: float, utilities: float):
     }
 
 
-def normalize_button_text(text: str) -> str:
-    if not text:
-        return ""
-    replacements = [
-        "🏠", "➕", "📊", "📜", "📌", "⚙️", "⚙", "💰", "💸", "🎯",
-        "💳", "🔁", "🏦", "📅", "📆", "🗓", "📂", "📚", "❌", "⬅️", "⬅", "💼"
-    ]
-    value = text.strip()
-    for item in replacements:
-        value = value.replace(item, "")
-    return " ".join(value.split()).lower()
-
-
 async def build_budget_preview_text(telegram_id: int, model: dict) -> str:
     auto = model["auto_budget"]
     return (
@@ -560,14 +547,7 @@ async def build_budget_from_db(telegram_id: int, budget) -> str:
     )
 
 
-async def operation_card(
-    telegram_id: int,
-    kind: str,
-    amount: float,
-    category: Optional[str] = None,
-    balance: Optional[float] = None,
-    name: Optional[str] = None,
-) -> str:
+async def operation_card(telegram_id: int, kind: str, amount: float, category: Optional[str] = None, balance: Optional[float] = None, name: Optional[str] = None) -> str:
     if kind == "income":
         text = f"✅ Доход\n{await money(telegram_id, amount)}"
     elif kind == "expense":
@@ -612,50 +592,55 @@ async def show_home(message: Message, text: str = "🏠 Главное меню"
     await message.answer("Быстрые действия:", reply_markup=home_inline())
 
 
+async def open_budget_entry(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state)
+    await state.clear()
+    await state.set_state(BudgetFlow.waiting_salary)
+    await state.update_data(bot_prompt_ids=[], user_message_ids=[])
+    sent = await message.answer(f"Шаг 1/3 — введите доход за {get_current_month_key()}:", reply_markup=cancel_menu())
+    await remember_prompt(state, sent.message_id)
+
+
 async def start_income_flow(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state)
     await state.clear()
     await state.set_state(AddIncomeFlow.waiting_amount)
     await send_tracked(message, state, "Введите сумму дохода:", reply_markup=cancel_menu())
 
 
 async def start_expense_flow(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state)
     await state.clear()
     await state.set_state(AddExpenseFlow.waiting_amount)
     await send_tracked(message, state, "Введите сумму расхода:", reply_markup=cancel_menu())
 
 
 async def start_goal_flow(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state)
     await state.clear()
     await state.set_state(GoalFlow.waiting_name)
     await send_tracked(message, state, "Название цели:", reply_markup=cancel_menu())
 
 
 async def start_debt_flow(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state)
     await state.clear()
     await state.set_state(DebtFlow.waiting_name)
     await send_tracked(message, state, "Название долга:", reply_markup=cancel_menu())
 
 
 async def start_recurring_flow(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state)
     await state.clear()
     await state.set_state(RecurringFlow.waiting_name)
     await send_tracked(message, state, "Название автоплатежа:", reply_markup=cancel_menu())
 
 
 async def start_fund_flow(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state)
     await state.clear()
     await state.set_state(FundFlow.waiting_name)
     await send_tracked(message, state, "Название фонда:", reply_markup=cancel_menu())
-
-
-async def start_budget_flow(message: Message, state: FSMContext):
-    await state.clear()
-    month_key = get_current_month_key()
-    existing = await get_budget_by_month(message.from_user.id, month_key)
-    if existing:
-        await message.answer(await build_budget_from_db(message.from_user.id, existing), reply_markup=root_menu())
-    await state.set_state(BudgetFlow.waiting_salary)
-    await send_tracked(message, state, f"Шаг 1/3 — введите доход за {month_key}:", reply_markup=cancel_menu())
 
 
 @router.message(CommandStart())
@@ -667,10 +652,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    await message.answer(
-        "Бот работает через кнопки, а данные хранятся отдельно для каждого пользователя.",
-        reply_markup=root_menu(),
-    )
+    await message.answer("Бот работает через кнопки, а данные хранятся отдельно для каждого пользователя.", reply_markup=root_menu())
 
 
 @router.callback_query(F.data == "global:cancel")
@@ -699,25 +681,24 @@ async def inline_home_add(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "home:income")
 async def inline_income(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
     await start_income_flow(callback.message, state)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "home:expense")
 async def inline_expense(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
     await start_expense_flow(callback.message, state)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "home:budget")
 async def inline_budget(callback: CallbackQuery, state: FSMContext):
+    await open_budget_entry(callback.message, state)
     await callback.answer()
-    await start_budget_flow(callback.message, state)
 
 
 @router.callback_query(F.data == "home:history")
 async def inline_history(callback: CallbackQuery, state: FSMContext):
-    await cleanup_flow_messages(callback.message.chat.id, state)
     await state.clear()
     operations = await get_recent_operations(callback.from_user.id)
     if not operations:
@@ -733,19 +714,14 @@ async def inline_history(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "home:balance")
 async def inline_balance(callback: CallbackQuery, state: FSMContext):
-    await cleanup_flow_messages(callback.message.chat.id, state)
     await state.clear()
     balance = await get_balance(callback.from_user.id)
-    await callback.message.answer(
-        f"💼 Баланс\n{await money(callback.from_user.id, balance)}",
-        reply_markup=root_menu(),
-    )
+    await callback.message.answer(f"💼 Баланс\n{await money(callback.from_user.id, balance)}", reply_markup=root_menu())
     await callback.answer()
 
 
 @router.callback_query(F.data == "home:summary")
 async def inline_summary(callback: CallbackQuery, state: FSMContext):
-    await cleanup_flow_messages(callback.message.chat.id, state)
     await state.clear()
     balance = await get_balance(callback.from_user.id)
     week_ops = await get_period_operations(callback.from_user.id, 7)
@@ -753,7 +729,6 @@ async def inline_summary(callback: CallbackQuery, state: FSMContext):
     current_budget = await get_budget_by_month(callback.from_user.id, get_current_month_key())
     week_income, week_expense, _ = summarize_operations(week_ops)
     month_income, month_expense, _ = summarize_operations(month_ops)
-
     text = (
         f"📌 Сводка\n"
         f"Баланс: {await money(callback.from_user.id, balance)}\n"
@@ -762,7 +737,6 @@ async def inline_summary(callback: CallbackQuery, state: FSMContext):
     )
     if current_budget:
         text += f"\nЛимит недели: {await money(callback.from_user.id, current_budget.remaining / 4)}"
-
     await callback.message.answer(text, reply_markup=root_menu())
     await callback.answer()
 
@@ -770,7 +744,6 @@ async def inline_summary(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("again:"))
 async def repeat_action(callback: CallbackQuery, state: FSMContext):
     action = callback.data.split(":", 1)[1]
-    await callback.answer()
     mapping = {
         "income": start_income_flow,
         "expense": start_expense_flow,
@@ -780,6 +753,285 @@ async def repeat_action(callback: CallbackQuery, state: FSMContext):
         "fund": start_fund_flow,
     }
     await mapping[action](callback.message, state)
+    await callback.answer()
+
+
+@router.message(F.text == "🏠 Главная")
+async def btn_home(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    await show_home(message)
+
+
+@router.message(F.text == "➕ Добавить")
+async def btn_add(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    await message.answer("➕ Что добавить?", reply_markup=add_menu())
+
+
+@router.message(F.text == "💰 Доход")
+@router.message(F.text == "🔁 Еще доход")
+async def btn_income(message: Message, state: FSMContext):
+    await safe_delete_message(message.chat.id, message.message_id)
+    await start_income_flow(message, state)
+
+
+@router.message(F.text == "💸 Расход")
+@router.message(F.text == "🔁 Еще расход")
+async def btn_expense(message: Message, state: FSMContext):
+    await safe_delete_message(message.chat.id, message.message_id)
+    await start_expense_flow(message, state)
+
+
+@router.message(F.text == "🎯 Цель")
+@router.message(F.text == "🔁 Еще цель")
+async def btn_goal(message: Message, state: FSMContext):
+    await safe_delete_message(message.chat.id, message.message_id)
+    await start_goal_flow(message, state)
+
+
+@router.message(F.text == "💳 Долг")
+@router.message(F.text == "🔁 Еще долг")
+async def btn_debt(message: Message, state: FSMContext):
+    await safe_delete_message(message.chat.id, message.message_id)
+    await start_debt_flow(message, state)
+
+
+@router.message(F.text == "🔁 Автоплатеж")
+@router.message(F.text == "🔁 Еще автоплатеж")
+async def btn_recurring(message: Message, state: FSMContext):
+    await safe_delete_message(message.chat.id, message.message_id)
+    await start_recurring_flow(message, state)
+
+
+@router.message(F.text == "🏦 Фонд")
+@router.message(F.text == "🔁 Еще фонд")
+async def btn_fund(message: Message, state: FSMContext):
+    await safe_delete_message(message.chat.id, message.message_id)
+    await start_fund_flow(message, state)
+
+
+@router.message(F.text == "📊 Бюджет")
+async def btn_budget(message: Message, state: FSMContext):
+    await safe_delete_message(message.chat.id, message.message_id)
+    await open_budget_entry(message, state)
+
+
+@router.message(F.text == "📜 История")
+async def btn_history(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    operations = await get_recent_operations(message.from_user.id)
+    if not operations:
+        await message.answer("📜 История пуста", reply_markup=root_menu())
+        return
+    text = "📜 Последние операции:\n\n"
+    for op in operations[:10]:
+        emoji = "💰" if op.type == "income" else "💸"
+        text += f"{emoji} {await money(message.from_user.id, op.amount)} · {op.category} · {op.created_at.strftime('%d.%m %H:%M')}\n"
+    await message.answer(text, reply_markup=root_menu())
+
+
+@router.message(F.text == "📌 Сводка")
+async def btn_summary(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    balance = await get_balance(message.from_user.id)
+    week_ops = await get_period_operations(message.from_user.id, 7)
+    month_ops = await get_period_operations(message.from_user.id, 30)
+    current_budget = await get_budget_by_month(message.from_user.id, get_current_month_key())
+    week_income, week_expense, _ = summarize_operations(week_ops)
+    month_income, month_expense, _ = summarize_operations(month_ops)
+    text = (
+        f"📌 Сводка\n"
+        f"Баланс: {await money(message.from_user.id, balance)}\n"
+        f"Неделя: +{await money(message.from_user.id, week_income)} / -{await money(message.from_user.id, week_expense)}\n"
+        f"Месяц: +{await money(message.from_user.id, month_income)} / -{await money(message.from_user.id, month_expense)}"
+    )
+    if current_budget:
+        text += f"\nЛимит недели: {await money(message.from_user.id, current_budget.remaining / 4)}"
+    await message.answer(text, reply_markup=root_menu())
+
+
+@router.message(F.text == "⚙️ Еще")
+async def btn_more(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    await message.answer("⚙️ Дополнительно", reply_markup=more_menu())
+
+
+@router.message(F.text == "💼 Баланс")
+async def btn_balance(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    balance = await get_balance(message.from_user.id)
+    await message.answer(f"💼 Баланс\n{await money(message.from_user.id, balance)}", reply_markup=more_menu())
+
+
+@router.message(F.text == "📅 Сегодня")
+async def btn_today(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    operations = await get_period_operations(message.from_user.id, 1)
+    today = datetime.now().date()
+    items = [op for op in operations if op.created_at.date() == today]
+    if not items:
+        await message.answer("📅 Сегодня пусто", reply_markup=more_menu())
+        return
+    income, expense, total = summarize_operations(items)
+    await message.answer(
+        f"📅 Сегодня\nДоходы: {await money(message.from_user.id, income)}\nРасходы: {await money(message.from_user.id, expense)}\nИтог: {await money(message.from_user.id, total)}",
+        reply_markup=more_menu(),
+    )
+
+
+@router.message(F.text == "📆 Неделя")
+async def btn_week(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    operations = await get_period_operations(message.from_user.id, 7)
+    if not operations:
+        await message.answer("📆 За неделю пусто", reply_markup=more_menu())
+        return
+    income, expense, total = summarize_operations(operations)
+    await message.answer(
+        f"📆 Неделя\nДоходы: {await money(message.from_user.id, income)}\nРасходы: {await money(message.from_user.id, expense)}\nИтог: {await money(message.from_user.id, total)}",
+        reply_markup=more_menu(),
+    )
+
+
+@router.message(F.text == "🗓 Месяц")
+async def btn_month(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    operations = await get_period_operations(message.from_user.id, 30)
+    if not operations:
+        await message.answer("🗓 За месяц пусто", reply_markup=more_menu())
+        return
+    income, expense, total = summarize_operations(operations)
+    await message.answer(
+        f"🗓 Месяц\nДоходы: {await money(message.from_user.id, income)}\nРасходы: {await money(message.from_user.id, expense)}\nИтог: {await money(message.from_user.id, total)}",
+        reply_markup=more_menu(),
+    )
+
+
+@router.message(F.text == "📂 Бюджет месяца")
+async def btn_current_budget(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    budget = await get_budget_by_month(message.from_user.id, get_current_month_key())
+    if not budget:
+        await message.answer("📂 Бюджет не создан\nСоздайте его через «📊 Бюджет»", reply_markup=more_menu())
+        return
+    await message.answer(await build_budget_from_db(message.from_user.id, budget), reply_markup=more_menu())
+
+
+@router.message(F.text == "📚 Архив бюджетов")
+async def btn_budget_archive(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    budgets = await get_budget_archive(message.from_user.id)
+    if not budgets:
+        await message.answer("📚 Архив пуст", reply_markup=more_menu())
+        return
+    text = "📚 Архив бюджетов:\n\n"
+    for budget in budgets:
+        text += f"{budget.month_key}: {await money(message.from_user.id, budget.salary)} / fixed {await money(message.from_user.id, budget.fixed_total)} / остаток {await money(message.from_user.id, budget.remaining)}\n"
+    await message.answer(text, reply_markup=more_menu())
+
+
+@router.message(F.text == "🎯 Цели")
+async def btn_goals(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    goals = await get_goals(message.from_user.id)
+    if not goals:
+        await message.answer("🎯 Целей пока нет\nДобавьте первую через «➕ Добавить» → «🎯 Цель»", reply_markup=more_menu())
+        return
+    text = "🎯 Цели:\n\n"
+    for goal in goals:
+        progress = (goal.current / goal.target * 100) if goal.target else 0
+        text += f"{goal.name}: {await money(message.from_user.id, goal.current)}/{await money(message.from_user.id, goal.target)} ({progress:.1f}%)\n"
+    await message.answer(text, reply_markup=more_menu())
+
+
+@router.message(F.text == "💳 Долги")
+async def btn_debts(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    debts = await get_debts(message.from_user.id)
+    if not debts:
+        await message.answer("💳 Долгов пока нет\nДобавьте первый через «➕ Добавить» → «💳 Долг»", reply_markup=more_menu())
+        return
+    total = sum(item.amount for item in debts)
+    text = "💳 Долги:\n\n"
+    for item in debts:
+        text += f"{item.name}: {await money(message.from_user.id, item.amount)}\n"
+    text += f"\nИтого: {await money(message.from_user.id, total)}"
+    await message.answer(text, reply_markup=more_menu())
+
+
+@router.message(F.text == "🔁 Автоплатежи")
+async def btn_recurring_list(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    recurring = await get_recurring(message.from_user.id)
+    if not recurring:
+        await message.answer("🔁 Автоплатежей нет\nДобавьте первый через «➕ Добавить» → «🔁 Автоплатеж»", reply_markup=more_menu())
+        return
+    total = sum(item.amount for item in recurring)
+    text = "🔁 Автоплатежи:\n\n"
+    for item in recurring:
+        text += f"{item.name}: {await money(message.from_user.id, item.amount)}/мес\n"
+    text += f"\nИтого: {await money(message.from_user.id, total)}/мес"
+    await message.answer(text, reply_markup=more_menu())
+
+
+@router.message(F.text == "🏦 Фонды")
+async def btn_funds(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    funds = await get_funds(message.from_user.id)
+    if not funds:
+        await message.answer("🏦 Фондов пока нет\nДобавьте первый через «➕ Добавить» → «🏦 Фонд»", reply_markup=more_menu())
+        return
+    text = "🏦 Фонды:\n\n"
+    for fund in funds:
+        progress = (fund.current_amount / fund.target_amount * 100) if fund.target_amount else 0
+        text += f"{fund.name}: {await money(message.from_user.id, fund.current_amount)}/{await money(message.from_user.id, fund.target_amount)} ({progress:.1f}%)\n"
+    await message.answer(text, reply_markup=more_menu())
+
+
+@router.message(F.text == "⚙️ Настройки")
+async def btn_settings(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    user = await get_or_create_user(message.from_user.id)
+    await state.set_state(SettingsFlow.viewing)
+    text = (
+        "⚙️ Настройки\n\n"
+        f"Валюта: {user.default_currency}\n"
+        f"Язык: {user.language}\n"
+        f"Часовой пояс: {user.timezone}\n"
+        f"Время уведомлений: {user.notification_time}\n"
+        f"Напоминания: {'ON' if user.reminders_enabled else 'OFF'}"
+    )
+    await message.answer(text, reply_markup=more_menu())
+    await message.answer("Изменить параметры:", reply_markup=settings_inline(user))
+
+
+@router.message(F.text == "⬅️ Назад")
+async def btn_back(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    await show_home(message)
+
+
+@router.message(F.text == "❌ Отмена")
+async def btn_cancel(message: Message, state: FSMContext):
+    await cleanup_flow_messages(message.chat.id, state, message.message_id)
+    await state.clear()
+    await show_home(message, "❌ Действие отменено")
 
 
 @router.message(AddIncomeFlow.waiting_amount)
@@ -805,10 +1057,7 @@ async def income_skip_comment(callback: CallbackQuery, state: FSMContext):
     balance = await get_balance(callback.from_user.id)
     await cleanup_flow_messages(callback.message.chat.id, state)
     await state.clear()
-    await callback.message.answer(
-        await operation_card(callback.from_user.id, "income", data["amount"], balance=balance),
-        reply_markup=repeat_menu("income"),
-    )
+    await callback.message.answer(await operation_card(callback.from_user.id, "income", data["amount"], balance=balance), reply_markup=repeat_menu("income"))
     await callback.message.answer("Быстрые действия:", reply_markup=quick_after_action_inline("income"))
     await callback.answer()
 
@@ -820,13 +1069,7 @@ async def income_comment(message: Message, state: FSMContext):
     comment = "" if message.text.strip() in {"Без комментария", "-"} else message.text.strip()
     await add_operation(message.from_user.id, "income", data["amount"], "Доход", comment)
     balance = await get_balance(message.from_user.id)
-    await finalize_flow(
-        message,
-        state,
-        await operation_card(message.from_user.id, "income", data["amount"], balance=balance),
-        repeat_menu("income"),
-        "income",
-    )
+    await finalize_flow(message, state, await operation_card(message.from_user.id, "income", data["amount"], balance=balance), repeat_menu("income"), "income")
 
 
 @router.message(AddExpenseFlow.waiting_amount)
@@ -866,16 +1109,7 @@ async def expense_skip_comment(callback: CallbackQuery, state: FSMContext):
     balance = await get_balance(callback.from_user.id)
     await cleanup_flow_messages(callback.message.chat.id, state)
     await state.clear()
-    await callback.message.answer(
-        await operation_card(
-            callback.from_user.id,
-            "expense",
-            data["amount"],
-            category=data["category"],
-            balance=balance,
-        ),
-        reply_markup=repeat_menu("expense"),
-    )
+    await callback.message.answer(await operation_card(callback.from_user.id, "expense", data["amount"], category=data["category"], balance=balance), reply_markup=repeat_menu("expense"))
     await callback.message.answer("Быстрые действия:", reply_markup=quick_after_action_inline("expense"))
     await callback.answer()
 
@@ -887,19 +1121,7 @@ async def expense_comment(message: Message, state: FSMContext):
     comment = "" if message.text.strip() in {"Без комментария", "-"} else message.text.strip()
     await add_operation(message.from_user.id, "expense", data["amount"], data["category"], comment)
     balance = await get_balance(message.from_user.id)
-    await finalize_flow(
-        message,
-        state,
-        await operation_card(
-            message.from_user.id,
-            "expense",
-            data["amount"],
-            category=data["category"],
-            balance=balance,
-        ),
-        repeat_menu("expense"),
-        "expense",
-    )
+    await finalize_flow(message, state, await operation_card(message.from_user.id, "expense", data["amount"], category=data["category"], balance=balance), repeat_menu("expense"), "expense")
 
 
 @router.message(GoalFlow.waiting_name)
@@ -924,13 +1146,7 @@ async def goal_amount(message: Message, state: FSMContext):
             return
         data = await state.get_data()
         await add_goal(message.from_user.id, data["name"], amount)
-        await finalize_flow(
-            message,
-            state,
-            await operation_card(message.from_user.id, "goal", amount, name=data["name"]),
-            repeat_menu("goal"),
-            "goal",
-        )
+        await finalize_flow(message, state, await operation_card(message.from_user.id, "goal", amount, name=data["name"]), repeat_menu("goal"), "goal")
     except ValueError:
         await send_tracked(message, state, "❌ Введите сумму числом", reply_markup=cancel_menu())
 
@@ -957,13 +1173,7 @@ async def debt_amount(message: Message, state: FSMContext):
             return
         data = await state.get_data()
         await add_debt(message.from_user.id, data["name"], amount)
-        await finalize_flow(
-            message,
-            state,
-            await operation_card(message.from_user.id, "debt", amount, name=data["name"]),
-            repeat_menu("debt"),
-            "debt",
-        )
+        await finalize_flow(message, state, await operation_card(message.from_user.id, "debt", amount, name=data["name"]), repeat_menu("debt"), "debt")
     except ValueError:
         await send_tracked(message, state, "❌ Введите сумму числом", reply_markup=cancel_menu())
 
@@ -990,13 +1200,7 @@ async def recurring_amount(message: Message, state: FSMContext):
             return
         data = await state.get_data()
         await add_recurring(message.from_user.id, data["name"], amount)
-        await finalize_flow(
-            message,
-            state,
-            await operation_card(message.from_user.id, "recurring", amount, name=data["name"]),
-            repeat_menu("recurring"),
-            "recurring",
-        )
+        await finalize_flow(message, state, await operation_card(message.from_user.id, "recurring", amount, name=data["name"]), repeat_menu("recurring"), "recurring")
     except ValueError:
         await send_tracked(message, state, "❌ Введите сумму числом", reply_markup=cancel_menu())
 
@@ -1038,13 +1242,7 @@ async def fund_monthly(message: Message, state: FSMContext):
             return
         data = await state.get_data()
         await add_fund(message.from_user.id, data["name"], data["target_amount"], monthly)
-        await finalize_flow(
-            message,
-            state,
-            await operation_card(message.from_user.id, "fund", data["target_amount"], name=data["name"]),
-            repeat_menu("fund"),
-            "fund",
-        )
+        await finalize_flow(message, state, await operation_card(message.from_user.id, "fund", data["target_amount"], name=data["name"]), repeat_menu("fund"), "fund")
     except ValueError:
         await send_tracked(message, state, "❌ Введите сумму числом", reply_markup=cancel_menu())
 
@@ -1087,43 +1285,25 @@ async def budget_utilities(message: Message, state: FSMContext):
         if utilities < 0:
             await send_tracked(message, state, "❌ Сумма не может быть отрицательной", reply_markup=cancel_menu())
             return
-
         data = await state.get_data()
         result = calculate_auto_budget(data["salary"], data["rent"], utilities)
         if result is None:
             await send_tracked(message, state, "❌ Fixed-расходы больше дохода", reply_markup=cancel_menu())
             return
-
         await state.update_data(preview_budget=result)
         await state.set_state(BudgetFlow.preview_distribution)
         await cleanup_flow_messages(message.chat.id, state)
-        sent = await message.answer(
-            await build_budget_preview_text(message.from_user.id, result),
-            reply_markup=budget_preview_inline(),
-        )
+        sent = await message.answer(await build_budget_preview_text(message.from_user.id, result), reply_markup=budget_preview_inline())
         await remember_prompt(state, sent.message_id)
     except ValueError:
         await send_tracked(message, state, "❌ Введите сумму числом", reply_markup=cancel_menu())
 
 
 @router.callback_query(BudgetFlow.preview_distribution, F.data == "budget:edit")
+@router.callback_query(BudgetFlow.confirm_distribution, F.data == "budget:edit")
 async def budget_edit_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(BudgetFlow.editing_distribution)
-    sent = await callback.message.answer(
-        "Выберите категорию для редактирования, потом введите новую сумму.",
-        reply_markup=budget_edit_inline(),
-    )
-    await remember_prompt(state, sent.message_id)
-    await callback.answer()
-
-
-@router.callback_query(BudgetFlow.confirm_distribution, F.data == "budget:edit")
-async def budget_edit_restart(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(BudgetFlow.editing_distribution)
-    sent = await callback.message.answer(
-        "Выберите категорию для редактирования, потом введите новую сумму.",
-        reply_markup=budget_edit_inline(),
-    )
+    sent = await callback.message.answer("Выберите категорию для редактирования, потом введите новую сумму.", reply_markup=budget_edit_inline())
     await remember_prompt(state, sent.message_id)
     await callback.answer()
 
@@ -1145,32 +1325,20 @@ async def budget_edit_amount(message: Message, state: FSMContext):
     if not category:
         await send_tracked(message, state, "❌ Сначала выберите категорию кнопкой", reply_markup=cancel_menu())
         return
-
     try:
         new_amount = parse_amount(message.text)
         if new_amount < 0:
             await send_tracked(message, state, "❌ Сумма не может быть отрицательной", reply_markup=cancel_menu())
             return
-
         preview = data["preview_budget"]
         preview["auto_budget"][category] = round(new_amount, 2)
         distributed_sum = round(sum(preview["auto_budget"].values()), 2)
-
         if distributed_sum > round(preview["remaining"], 2):
-            await send_tracked(
-                message,
-                state,
-                f"❌ Распределение больше остатка: {await money(message.from_user.id, distributed_sum)} > {await money(message.from_user.id, preview['remaining'])}",
-                reply_markup=cancel_menu(),
-            )
+            await send_tracked(message, state, f"❌ Распределение больше остатка: {await money(message.from_user.id, distributed_sum)} > {await money(message.from_user.id, preview['remaining'])}", reply_markup=cancel_menu())
             return
-
         await state.update_data(preview_budget=preview, edit_category=None)
         await state.set_state(BudgetFlow.confirm_distribution)
-        sent = await message.answer(
-            await build_budget_preview_text(message.from_user.id, preview),
-            reply_markup=budget_confirm_inline(),
-        )
+        sent = await message.answer(await build_budget_preview_text(message.from_user.id, preview), reply_markup=budget_confirm_inline())
         await remember_prompt(state, sent.message_id)
     except ValueError:
         await send_tracked(message, state, "❌ Введите сумму числом", reply_markup=cancel_menu())
@@ -1183,12 +1351,8 @@ async def budget_confirm(callback: CallbackQuery, state: FSMContext):
     if not preview:
         await callback.answer("Нет данных бюджета", show_alert=True)
         return
-
     await state.set_state(BudgetFlow.confirm_distribution)
-    sent = await callback.message.answer(
-        await build_budget_preview_text(callback.from_user.id, preview),
-        reply_markup=budget_confirm_inline(),
-    )
+    sent = await callback.message.answer(await build_budget_preview_text(callback.from_user.id, preview), reply_markup=budget_confirm_inline())
     await remember_prompt(state, sent.message_id)
     await callback.answer()
 
@@ -1196,6 +1360,7 @@ async def budget_confirm(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "budget:recalc")
 async def budget_recalc(callback: CallbackQuery, state: FSMContext):
     await cleanup_flow_messages(callback.message.chat.id, state)
+    await state.clear()
     await state.set_state(BudgetFlow.waiting_salary)
     sent = await callback.message.answer("Шаг 1/3 — введите новый доход:", reply_markup=cancel_menu())
     await remember_prompt(state, sent.message_id)
@@ -1209,7 +1374,6 @@ async def budget_save(callback: CallbackQuery, state: FSMContext):
     if not preview:
         await callback.answer("Нет данных бюджета", show_alert=True)
         return
-
     await save_budget(
         callback.from_user.id,
         get_current_month_key(),
@@ -1220,282 +1384,18 @@ async def budget_save(callback: CallbackQuery, state: FSMContext):
         preview["remaining"],
         preview["auto_budget"],
     )
-
     await cleanup_flow_messages(callback.message.chat.id, state)
     await state.clear()
     await callback.message.answer("✅ Бюджет сохранен", reply_markup=root_menu())
-    await callback.message.answer(
-        await build_budget_preview_text(callback.from_user.id, preview),
-        reply_markup=home_inline(),
-    )
+    await callback.message.answer(await build_budget_preview_text(callback.from_user.id, preview), reply_markup=home_inline())
     await callback.answer()
-
-
-@router.message()
-async def universal_menu_router(message: Message, state: FSMContext):
-    text = normalize_button_text(message.text)
-
-    if text == "главная":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        await show_home(message)
-        return
-
-    if text == "добавить":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        await message.answer("➕ Что добавить?", reply_markup=add_menu())
-        return
-
-    if text in {"доход", "еще доход"}:
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await start_income_flow(message, state)
-        return
-
-    if text in {"расход", "еще расход"}:
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await start_expense_flow(message, state)
-        return
-
-    if text in {"цель", "еще цель"}:
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await start_goal_flow(message, state)
-        return
-
-    if text in {"долг", "еще долг"}:
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await start_debt_flow(message, state)
-        return
-
-    if text in {"автоплатеж", "еще автоплатеж"}:
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await start_recurring_flow(message, state)
-        return
-
-    if text in {"фонд", "еще фонд"}:
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await start_fund_flow(message, state)
-        return
-
-    if text == "бюджет":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await start_budget_flow(message, state)
-        return
-
-    if text == "история":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        operations = await get_recent_operations(message.from_user.id)
-        if not operations:
-            await message.answer("📜 История пуста", reply_markup=root_menu())
-            return
-
-        text_out = "📜 Последние операции:\n\n"
-        for op in operations[:10]:
-            emoji = "💰" if op.type == "income" else "💸"
-            text_out += f"{emoji} {await money(message.from_user.id, op.amount)} · {op.category} · {op.created_at.strftime('%d.%m %H:%M')}\n"
-        await message.answer(text_out, reply_markup=root_menu())
-        return
-
-    if text == "сводка":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        balance = await get_balance(message.from_user.id)
-        week_ops = await get_period_operations(message.from_user.id, 7)
-        month_ops = await get_period_operations(message.from_user.id, 30)
-        current_budget = await get_budget_by_month(message.from_user.id, get_current_month_key())
-        week_income, week_expense, _ = summarize_operations(week_ops)
-        month_income, month_expense, _ = summarize_operations(month_ops)
-
-        text_out = (
-            f"📌 Сводка\n"
-            f"Баланс: {await money(message.from_user.id, balance)}\n"
-            f"Неделя: +{await money(message.from_user.id, week_income)} / -{await money(message.from_user.id, week_expense)}\n"
-            f"Месяц: +{await money(message.from_user.id, month_income)} / -{await money(message.from_user.id, month_expense)}"
-        )
-        if current_budget:
-            text_out += f"\nЛимит недели: {await money(message.from_user.id, current_budget.remaining / 4)}"
-
-        await message.answer(text_out, reply_markup=root_menu())
-        return
-
-    if text == "еще":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        await message.answer("⚙️ Дополнительно", reply_markup=more_menu())
-        return
-
-    if text == "баланс":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        balance = await get_balance(message.from_user.id)
-        await message.answer(f"💼 Баланс\n{await money(message.from_user.id, balance)}", reply_markup=more_menu())
-        return
-
-    if text == "сегодня":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        operations = await get_period_operations(message.from_user.id, 1)
-        today = datetime.now().date()
-        items = [op for op in operations if op.created_at.date() == today]
-        if not items:
-            await message.answer("📅 Сегодня пусто", reply_markup=more_menu())
-            return
-        income, expense, total = summarize_operations(items)
-        await message.answer(
-            f"📅 Сегодня\nДоходы: {await money(message.from_user.id, income)}\nРасходы: {await money(message.from_user.id, expense)}\nИтог: {await money(message.from_user.id, total)}",
-            reply_markup=more_menu(),
-        )
-        return
-
-    if text == "неделя":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        operations = await get_period_operations(message.from_user.id, 7)
-        if not operations:
-            await message.answer("📆 За неделю пусто", reply_markup=more_menu())
-            return
-        income, expense, total = summarize_operations(operations)
-        await message.answer(
-            f"📆 Неделя\nДоходы: {await money(message.from_user.id, income)}\nРасходы: {await money(message.from_user.id, expense)}\nИтог: {await money(message.from_user.id, total)}",
-            reply_markup=more_menu(),
-        )
-        return
-
-    if text == "месяц":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        operations = await get_period_operations(message.from_user.id, 30)
-        if not operations:
-            await message.answer("🗓 За месяц пусто", reply_markup=more_menu())
-            return
-        income, expense, total = summarize_operations(operations)
-        await message.answer(
-            f"🗓 Месяц\nДоходы: {await money(message.from_user.id, income)}\nРасходы: {await money(message.from_user.id, expense)}\nИтог: {await money(message.from_user.id, total)}",
-            reply_markup=more_menu(),
-        )
-        return
-
-    if text == "бюджет месяца":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        budget = await get_budget_by_month(message.from_user.id, get_current_month_key())
-        if not budget:
-            await message.answer("📂 Бюджет не создан\nСоздайте его через «📊 Бюджет»", reply_markup=more_menu())
-            return
-        await message.answer(await build_budget_from_db(message.from_user.id, budget), reply_markup=more_menu())
-        return
-
-    if text == "архив бюджетов":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        budgets = await get_budget_archive(message.from_user.id)
-        if not budgets:
-            await message.answer("📚 Архив пуст", reply_markup=more_menu())
-            return
-        text_out = "📚 Архив бюджетов:\n\n"
-        for budget in budgets:
-            text_out += f"{budget.month_key}: {await money(message.from_user.id, budget.salary)} / fixed {await money(message.from_user.id, budget.fixed_total)} / остаток {await money(message.from_user.id, budget.remaining)}\n"
-        await message.answer(text_out, reply_markup=more_menu())
-        return
-
-    if text == "цели":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        goals = await get_goals(message.from_user.id)
-        if not goals:
-            await message.answer("🎯 Целей пока нет\nДобавьте первую через «➕ Добавить» → «🎯 Цель»", reply_markup=more_menu())
-            return
-        text_out = "🎯 Цели:\n\n"
-        for goal in goals:
-            progress = (goal.current / goal.target * 100) if goal.target else 0
-            text_out += f"{goal.name}: {await money(message.from_user.id, goal.current)}/{await money(message.from_user.id, goal.target)} ({progress:.1f}%)\n"
-        await message.answer(text_out, reply_markup=more_menu())
-        return
-
-    if text == "долги":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        debts = await get_debts(message.from_user.id)
-        if not debts:
-            await message.answer("💳 Долгов пока нет\nДобавьте первый через «➕ Добавить» → «💳 Долг»", reply_markup=more_menu())
-            return
-        total = sum(item.amount for item in debts)
-        text_out = "💳 Долги:\n\n"
-        for item in debts:
-            text_out += f"{item.name}: {await money(message.from_user.id, item.amount)}\n"
-        text_out += f"\nИтого: {await money(message.from_user.id, total)}"
-        await message.answer(text_out, reply_markup=more_menu())
-        return
-
-    if text == "автоплатежи":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        recurring = await get_recurring(message.from_user.id)
-        if not recurring:
-            await message.answer("🔁 Автоплатежей нет\nДобавьте первый через «➕ Добавить» → «🔁 Автоплатеж»", reply_markup=more_menu())
-            return
-        total = sum(item.amount for item in recurring)
-        text_out = "🔁 Автоплатежи:\n\n"
-        for item in recurring:
-            text_out += f"{item.name}: {await money(message.from_user.id, item.amount)}/мес\n"
-        text_out += f"\nИтого: {await money(message.from_user.id, total)}/мес"
-        await message.answer(text_out, reply_markup=more_menu())
-        return
-
-    if text == "фонды":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        funds = await get_funds(message.from_user.id)
-        if not funds:
-            await message.answer("🏦 Фондов пока нет\nДобавьте первый через «➕ Добавить» → «🏦 Фонд»", reply_markup=more_menu())
-            return
-        text_out = "🏦 Фонды:\n\n"
-        for fund in funds:
-            progress = (fund.current_amount / fund.target_amount * 100) if fund.target_amount else 0
-            text_out += f"{fund.name}: {await money(message.from_user.id, fund.current_amount)}/{await money(message.from_user.id, fund.target_amount)} ({progress:.1f}%)\n"
-        await message.answer(text_out, reply_markup=more_menu())
-        return
-
-    if text == "настройки":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        user = await get_or_create_user(message.from_user.id)
-        await state.set_state(SettingsFlow.viewing)
-        text_out = (
-            "⚙️ Настройки\n\n"
-            f"Валюта: {user.default_currency}\n"
-            f"Язык: {user.language}\n"
-            f"Часовой пояс: {user.timezone}\n"
-            f"Время уведомлений: {user.notification_time}\n"
-            f"Напоминания: {'ON' if user.reminders_enabled else 'OFF'}"
-        )
-        await message.answer(text_out, reply_markup=more_menu())
-        await message.answer("Изменить параметры:", reply_markup=settings_inline(user))
-        return
-
-    if text == "назад":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        await show_home(message)
-        return
-
-    if text == "отмена":
-        await cleanup_flow_messages(message.chat.id, state, message.message_id)
-        await state.clear()
-        await show_home(message, "❌ Действие отменено")
-        return
-
-    await message.answer("Используйте кнопки меню.", reply_markup=root_menu())
 
 
 @router.callback_query(F.data == "settings:toggle_reminders")
 async def settings_toggle_reminders(callback: CallbackQuery):
     user = await get_or_create_user(callback.from_user.id)
     updated = await update_user_settings(callback.from_user.id, reminders_enabled=not user.reminders_enabled)
-    await callback.message.answer(
-        f"✅ Напоминания: {'ON' if updated.reminders_enabled else 'OFF'}",
-        reply_markup=settings_inline(updated),
-    )
+    await callback.message.answer(f"✅ Напоминания: {'ON' if updated.reminders_enabled else 'OFF'}", reply_markup=settings_inline(updated))
     await callback.answer()
 
 
@@ -1537,11 +1437,13 @@ async def settings_time(callback: CallbackQuery):
 async def settings_time_apply(callback: CallbackQuery):
     value = callback.data.split(":", 1)[1]
     updated = await update_user_settings(callback.from_user.id, notification_time=value)
-    await callback.message.answer(
-        f"✅ Время уведомлений: {updated.notification_time}",
-        reply_markup=settings_inline(updated),
-    )
+    await callback.message.answer(f"✅ Время уведомлений: {updated.notification_time}", reply_markup=settings_inline(updated))
     await callback.answer()
+
+
+@router.message()
+async def fallback_message(message: Message):
+    await message.answer("Используйте кнопки меню.", reply_markup=root_menu())
 
 
 async def main():
