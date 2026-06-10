@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command, CommandStart
@@ -17,6 +17,7 @@ from db import (
     add_operation,
     get_balance,
     get_recent_operations,
+    get_period_operations,
     save_budget,
     get_budget_by_month,
     get_budget_archive,
@@ -72,9 +73,12 @@ def main_menu():
         keyboard=[
             [KeyboardButton(text="💰 Доход"), KeyboardButton(text="💸 Расход")],
             [KeyboardButton(text="📊 Бюджет"), KeyboardButton(text="💼 Баланс")],
+            [KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📆 Неделя")],
+            [KeyboardButton(text="🗓 Месяц"), KeyboardButton(text="📌 Сводка")],
             [KeyboardButton(text="📜 История"), KeyboardButton(text="📂 Бюджет месяца")],
             [KeyboardButton(text="📚 Архив бюджетов"), KeyboardButton(text="🎯 Цели")],
             [KeyboardButton(text="💳 Долги"), KeyboardButton(text="🔁 Автоплатежи")],
+            [KeyboardButton(text="🏦 Фонды"), KeyboardButton(text="⚙️ Настройки")],
         ],
         resize_keyboard=True,
     )
@@ -158,12 +162,45 @@ def build_budget_text_from_model(budget) -> str:
     )
 
 
+def summarize_operations(operations):
+    income = sum(op.amount for op in operations if op.type == "income")
+    expense = sum(op.amount for op in operations if op.type == "expense")
+    return income, expense, income - expense
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await get_or_create_user(message.from_user.id)
     await state.clear()
     await message.answer(
-        "👋 Добро пожаловать в финансового бота.",
+        "👋 Добро пожаловать в финансового бота.\n"
+        "Выберите действие в меню ниже.",
+        reply_markup=main_menu(),
+    )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "Доступные разделы:\n\n"
+        "💰 Доход — добавить доход\n"
+        "💸 Расход — добавить расход\n"
+        "📊 Бюджет — рассчитать бюджет месяца\n"
+        "💼 Баланс — показать общий баланс\n"
+        "📅 Сегодня / 📆 Неделя / 🗓 Месяц — отчеты по периоду\n"
+        "📌 Сводка — общая сводка по финансам\n"
+        "📜 История — последние операции\n"
+        "📂 Бюджет месяца — текущий бюджет\n"
+        "📚 Архив бюджетов — прошлые месяцы\n"
+        "🎯 Цели — накопительные цели\n"
+        "💳 Долги — список долгов\n"
+        "🔁 Автоплатежи — регулярные платежи\n"
+        "🏦 Фонды — пока MVP-заглушка\n"
+        "⚙️ Настройки — пока MVP-заглушка\n\n"
+        "Текстовые команды:\n"
+        "цель Название 50000\n"
+        "долг Название 145000\n"
+        "автоплатеж Название 3000",
         reply_markup=main_menu(),
     )
 
@@ -206,7 +243,9 @@ async def process_income_comment(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        f"✅ Доход добавлен\nСумма: {data['amount']:.2f} ₽\nБаланс: {balance:.2f} ₽",
+        f"✅ Доход добавлен\n"
+        f"Сумма: {data['amount']:.2f} ₽\n"
+        f"Баланс: {balance:.2f} ₽",
         reply_markup=main_menu(),
     )
 
@@ -259,8 +298,10 @@ async def process_expense_comment(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        f"✅ Расход добавлен\nСумма: {data['amount']:.2f} ₽\n"
-        f"Категория: {data['category']}\nБаланс: {balance:.2f} ₽",
+        f"✅ Расход добавлен\n"
+        f"Сумма: {data['amount']:.2f} ₽\n"
+        f"Категория: {data['category']}\n"
+        f"Баланс: {balance:.2f} ₽",
         reply_markup=main_menu(),
     )
 
@@ -272,13 +313,15 @@ async def start_budget_flow(message: Message, state: FSMContext):
 
     if existing_budget:
         await message.answer(
-            f"На {month_key} бюджет уже есть.\n\n{build_budget_text_from_model(existing_budget)}\n"
+            f"На {month_key} бюджет уже есть.\n\n"
+            f"{build_budget_text_from_model(existing_budget)}\n\n"
             f"Введите новую зарплату, если хотите пересчитать.",
             reply_markup=cancel_menu(),
         )
     else:
         await message.answer(
-            f"Начинаем расчет бюджета на {month_key}.\nВведите зарплату за месяц:",
+            f"Начинаем расчет бюджета на {month_key}.\n"
+            f"Введите зарплату за месяц:",
             reply_markup=cancel_menu(),
         )
 
@@ -319,11 +362,18 @@ async def process_budget_rent(message: Message, state: FSMContext):
 async def process_budget_utilities(message: Message, state: FSMContext):
     try:
         utilities = parse_amount(message.text)
-        data = await state.get_data()
+        if utilities < 0:
+            await message.answer("❌ Сумма не может быть отрицательной", reply_markup=cancel_menu())
+            return
 
+        data = await state.get_data()
         result = calculate_auto_budget(data["salary"], data["rent"], utilities)
+
         if result is None:
-            await message.answer("❌ Фиксированные расходы превышают доход.", reply_markup=cancel_menu())
+            await message.answer(
+                "❌ Фиксированные расходы превышают доход.",
+                reply_markup=cancel_menu(),
+            )
             return
 
         await state.update_data(preview_budget=result)
@@ -335,7 +385,14 @@ async def process_budget_utilities(message: Message, state: FSMContext):
             f"Аренда: {result['rent']:.2f} ₽\n"
             f"Коммуналка: {result['utilities']:.2f} ₽\n"
             f"Итого fixed: {result['fixed_total']:.2f} ₽\n"
-            f"Остаток: {result['remaining']:.2f} ₽"
+            f"Остаток: {result['remaining']:.2f} ₽\n\n"
+            f"Автораспределение:\n"
+            f"• Еда: {result['auto_budget']['Еда']:.2f} ₽\n"
+            f"• Транспорт: {result['auto_budget']['Транспорт']:.2f} ₽\n"
+            f"• Накопления: {result['auto_budget']['Накопления']:.2f} ₽\n"
+            f"• Развлечения: {result['auto_budget']['Развлечения']:.2f} ₽\n"
+            f"• Здоровье: {result['auto_budget']['Здоровье']:.2f} ₽\n"
+            f"• Прочее: {result['auto_budget']['Прочее']:.2f} ₽"
         )
 
         await message.answer(text, reply_markup=budget_preview_menu())
@@ -378,6 +435,104 @@ async def recalc_budget_preview(message: Message, state: FSMContext):
 async def balance_button(message: Message):
     balance = await get_balance(message.from_user.id)
     await message.answer(f"💼 Текущий баланс: {balance:.2f} ₽", reply_markup=main_menu())
+
+
+@router.message(F.text == "📅 Сегодня")
+async def today_button(message: Message):
+    operations = await get_period_operations(message.from_user.id, 1)
+
+    if not operations:
+        await message.answer("За сегодня операций нет.", reply_markup=main_menu())
+        return
+
+    today = datetime.now().date()
+    operations = [op for op in operations if op.created_at.date() == today]
+
+    if not operations:
+        await message.answer("За сегодня операций нет.", reply_markup=main_menu())
+        return
+
+    income, expense, total = summarize_operations(operations)
+
+    await message.answer(
+        f"📅 Сегодня\n\n"
+        f"Доходы: {income:.2f} ₽\n"
+        f"Расходы: {expense:.2f} ₽\n"
+        f"Итог: {total:.2f} ₽",
+        reply_markup=main_menu(),
+    )
+
+
+@router.message(F.text == "📆 Неделя")
+async def week_button(message: Message):
+    operations = await get_period_operations(message.from_user.id, 7)
+
+    if not operations:
+        await message.answer("За неделю операций нет.", reply_markup=main_menu())
+        return
+
+    income, expense, total = summarize_operations(operations)
+
+    await message.answer(
+        f"📆 Неделя\n\n"
+        f"Доходы: {income:.2f} ₽\n"
+        f"Расходы: {expense:.2f} ₽\n"
+        f"Итог: {total:.2f} ₽",
+        reply_markup=main_menu(),
+    )
+
+
+@router.message(F.text == "🗓 Месяц")
+async def month_button(message: Message):
+    operations = await get_period_operations(message.from_user.id, 30)
+
+    if not operations:
+        await message.answer("За месяц операций нет.", reply_markup=main_menu())
+        return
+
+    income, expense, total = summarize_operations(operations)
+
+    await message.answer(
+        f"🗓 Месяц\n\n"
+        f"Доходы: {income:.2f} ₽\n"
+        f"Расходы: {expense:.2f} ₽\n"
+        f"Итог: {total:.2f} ₽",
+        reply_markup=main_menu(),
+    )
+
+
+@router.message(F.text == "📌 Сводка")
+async def summary_button(message: Message):
+    balance = await get_balance(message.from_user.id)
+    week_ops = await get_period_operations(message.from_user.id, 7)
+    month_ops = await get_period_operations(message.from_user.id, 30)
+    current_budget = await get_budget_by_month(message.from_user.id, get_current_month_key())
+
+    week_income, week_expense, _ = summarize_operations(week_ops)
+    month_income, month_expense, _ = summarize_operations(month_ops)
+
+    text = (
+        f"📌 Общая сводка\n\n"
+        f"Баланс: {balance:.2f} ₽\n\n"
+        f"За неделю:\n"
+        f"• Доходы: {week_income:.2f} ₽\n"
+        f"• Расходы: {week_expense:.2f} ₽\n\n"
+        f"За месяц:\n"
+        f"• Доходы: {month_income:.2f} ₽\n"
+        f"• Расходы: {month_expense:.2f} ₽\n"
+    )
+
+    if current_budget:
+        weekly_safe_limit = current_budget.remaining / 4
+        text += (
+            f"\nТекущий бюджет:\n"
+            f"• Остаток бюджета: {current_budget.remaining:.2f} ₽\n"
+            f"• Рекомендуемый недельный лимит: {weekly_safe_limit:.2f} ₽"
+        )
+    else:
+        text += "\nБюджет на текущий месяц пока не создан."
+
+    await message.answer(text, reply_markup=main_menu())
 
 
 @router.message(F.text == "📜 История")
@@ -435,7 +590,8 @@ async def goals_button(message: Message):
 
     if not goals:
         await message.answer(
-            "🎯 Целей накопления пока нет.\n\nДобавление: цель Название 50000",
+            "🎯 Целей накопления пока нет.\n\n"
+            "Добавление: цель Название 50000",
             reply_markup=main_menu(),
         )
         return
@@ -443,8 +599,15 @@ async def goals_button(message: Message):
     text = "🎯 Цели накопления:\n\n"
     for goal in goals:
         progress = (goal.current / goal.target * 100) if goal.target else 0
-        text += f"• {goal.name}: {goal.current:.2f} ₽ / {goal.target:.2f} ₽ ({progress:.1f}%)\n"
+        left = max(goal.target - goal.current, 0)
+        text += (
+            f"• {goal.name}\n"
+            f"  Накоплено: {goal.current:.2f} ₽ / {goal.target:.2f} ₽\n"
+            f"  Осталось: {left:.2f} ₽\n"
+            f"  Прогресс: {progress:.1f}%\n\n"
+        )
 
+    text += "Добавление: цель Название 50000"
     await message.answer(text, reply_markup=main_menu())
 
 
@@ -454,7 +617,8 @@ async def debts_button(message: Message):
 
     if not debts:
         await message.answer(
-            "💳 Долгов пока нет.\n\nДобавление: долг Название 145000",
+            "💳 Долгов пока нет.\n\n"
+            "Добавление: долг Название 145000",
             reply_markup=main_menu(),
         )
         return
@@ -464,7 +628,9 @@ async def debts_button(message: Message):
     for debt in debts:
         total += debt.amount
         text += f"• {debt.name}: {debt.amount:.2f} ₽\n"
-    text += f"\nИтого долгов: {total:.2f} ₽"
+
+    text += f"\nИтого долгов: {total:.2f} ₽\n\n"
+    text += "Добавление: долг Название 145000"
 
     await message.answer(text, reply_markup=main_menu())
 
@@ -475,7 +641,8 @@ async def recurring_button(message: Message):
 
     if not recurring:
         await message.answer(
-            "🔁 Автоплатежей пока нет.\n\nДобавление: автоплатеж Название 3000",
+            "🔁 Автоплатежей пока нет.\n\n"
+            "Добавление: автоплатеж Название 3000",
             reply_markup=main_menu(),
         )
         return
@@ -485,9 +652,29 @@ async def recurring_button(message: Message):
     for item in recurring:
         total += item.amount
         text += f"• {item.name}: {item.amount:.2f} ₽ / мес\n"
-    text += f"\nИтого: {total:.2f} ₽ / мес"
+
+    text += f"\nИтого регулярных платежей: {total:.2f} ₽ / мес\n\n"
+    text += "Добавление: автоплатеж Название 3000"
 
     await message.answer(text, reply_markup=main_menu())
+
+
+@router.message(F.text == "🏦 Фонды")
+async def funds_button(message: Message):
+    await message.answer(
+        "🏦 Раздел фондов пока не подключен к текущей базе.\n\n"
+        "Следующий шаг: добавить в db.py модель Fund и функции get_funds/add_fund.",
+        reply_markup=main_menu(),
+    )
+
+
+@router.message(F.text == "⚙️ Настройки")
+async def settings_button(message: Message):
+    await message.answer(
+        "⚙️ Раздел настроек пока в MVP-режиме.\n\n"
+        "Следующий шаг: добавить в db.py user settings, время уведомлений и флаги напоминаний.",
+        reply_markup=main_menu(),
+    )
 
 
 @router.message(F.text.regexp(r"^цель\s+.+\s+\d+[.,]?\d*$"))
@@ -498,7 +685,10 @@ async def add_goal_handler(message: Message):
     amount = parse_amount(amount_str)
 
     await add_goal(message.from_user.id, name, amount)
-    await message.answer(f"✅ Цель «{name}» добавлена на {amount:.2f} ₽", reply_markup=main_menu())
+    await message.answer(
+        f"✅ Цель «{name}» добавлена на {amount:.2f} ₽",
+        reply_markup=main_menu(),
+    )
 
 
 @router.message(F.text.regexp(r"^долг\s+.+\s+\d+[.,]?\d*$"))
@@ -509,7 +699,10 @@ async def add_debt_handler(message: Message):
     amount = parse_amount(amount_str)
 
     await add_debt(message.from_user.id, name, amount)
-    await message.answer(f"✅ Долг «{name}» добавлен: {amount:.2f} ₽", reply_markup=main_menu())
+    await message.answer(
+        f"✅ Долг «{name}» добавлен: {amount:.2f} ₽",
+        reply_markup=main_menu(),
+    )
 
 
 @router.message(F.text.regexp(r"^автоплатеж\s+.+\s+\d+[.,]?\d*$"))
@@ -520,16 +713,20 @@ async def add_recurring_handler(message: Message):
     amount = parse_amount(amount_str)
 
     await add_recurring(message.from_user.id, name, amount)
-    await message.answer(f"✅ Автоплатеж «{name}» добавлен: {amount:.2f} ₽ / мес", reply_markup=main_menu())
+    await message.answer(
+        f"✅ Автоплатеж «{name}» добавлен: {amount:.2f} ₽ / мес",
+        reply_markup=main_menu(),
+    )
 
 
 @router.message()
 async def fallback_handler(message: Message):
     await message.answer(
-        "Используйте кнопки меню или форматы:\n"
-        "цель Название 50000\n"
-        "долг Название 145000\n"
-        "автоплатеж Название 3000",
+        "Не понял сообщение.\n\n"
+        "Используйте кнопки меню или команды формата:\n"
+        "• цель Подушка 50000\n"
+        "• долг Кредит 145000\n"
+        "• автоплатеж Интернет 3000",
         reply_markup=main_menu(),
     )
 
