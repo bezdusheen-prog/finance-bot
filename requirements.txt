@@ -1,5 +1,4 @@
-aiogram==3.4.1
-SQLAlchemy==2.0.29
-aiosqlite
-python-dotenv
-apscheduler
+aiogram==3.7.0
+python-dotenv==1.0.1
+SQLAlchemy==2.0.30
+aiosqlite==0.20.0
